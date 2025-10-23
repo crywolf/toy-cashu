@@ -5,39 +5,36 @@ use clap::{Parser, Subcommand};
 
 use crate::wallet::Wallet;
 
-pub struct Repl {
+pub fn start(wallet: Wallet) -> Result<()> {
+    let wallet = Repl { wallet };
+    loop {
+        let line = wallet.readline()?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        match wallet.respond(line) {
+            Ok(quit) => {
+                if quit {
+                    break;
+                }
+            }
+            Err(err) => {
+                write!(std::io::stdout(), "{err}")?;
+                std::io::stdout().flush()?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+struct Repl {
     wallet: Wallet,
 }
 
 impl Repl {
-    pub fn new(wallet: Wallet) -> Self {
-        Self { wallet }
-    }
-
-    pub fn start(&self) -> Result<()> {
-        loop {
-            let line = self.readline()?;
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-
-            match self.respond(line) {
-                Ok(quit) => {
-                    if quit {
-                        break;
-                    }
-                }
-                Err(err) => {
-                    write!(std::io::stdout(), "{err}")?;
-                    std::io::stdout().flush()?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     fn respond(&self, line: &str) -> Result<bool> {
         let args = line.split_whitespace();
         let cli = Cli::try_parse_from(args)?;

@@ -2,7 +2,6 @@ use anyhow::bail;
 use rpassword::prompt_password;
 
 use crate::cli::Command;
-use crate::repl::Repl;
 use crate::wallet::Wallet;
 
 mod cli;
@@ -29,8 +28,7 @@ fn main() -> anyhow::Result<()> {
             }
             let wallet = Wallet::create(wallet_name, mint, password)?;
 
-            let repl = Repl::new(wallet);
-            repl.start()?;
+            repl::start(wallet)?;
         }
         Command::Open { wallet_name } => {
             let password = prompt_password("Wallet password: ").unwrap();
@@ -38,8 +36,7 @@ fn main() -> anyhow::Result<()> {
 
             let wallet = Wallet::open(wallet_name, password)?;
 
-            let repl = Repl::new(wallet);
-            repl.start()?;
+            repl::start(wallet)?;
         }
     }
 
