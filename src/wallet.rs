@@ -7,6 +7,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::file;
+
 const WALLETS_DIR: &str = ".wallets";
 const WALLET_FILE_EXT: &str = ".json";
 
@@ -88,29 +90,13 @@ impl Wallet {
 
     fn load(name: &str) -> Result<Self> {
         let path = PathBuf::from(WALLETS_DIR).join(Self::filename(name));
-
-        let file = File::open(&path).with_context(|| format!("open file {}", path.display()))?;
-
-        // TODO decrypt
-        let w = serde_json::from_reader(file).context("deserialize from file")?;
-
+        let w = file::load(path.as_path()).context("load wallet file")?;
         Ok(w)
     }
 
     fn save(&self) -> Result<()> {
         let path = PathBuf::from(WALLETS_DIR).join(Self::filename(&self.name));
-
-        let dir = path.parent().unwrap();
-        if !dir.exists() {
-            std::fs::create_dir(dir).with_context(|| format!("create dir {}", dir.display()))?;
-        }
-
-        let file =
-            File::create(&path).with_context(|| format!("create file {}", path.display()))?;
-
-        // TODO encrypt
-        serde_json::to_writer(file, &self).context("serialize to file")?;
-
+        file::save(self, path.as_path()).context("save wallet file")?;
         Ok(())
     }
 

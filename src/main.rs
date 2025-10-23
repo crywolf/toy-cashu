@@ -5,6 +5,7 @@ use crate::cli::Command;
 use crate::wallet::Wallet;
 
 mod cli;
+mod file;
 mod repl;
 mod wallet;
 
@@ -22,10 +23,12 @@ fn main() -> anyhow::Result<()> {
             let password = password.trim();
 
             let password_again = prompt_password("Password again: ").unwrap();
+            let password_again = password_again.trim();
 
             if password != password_again {
                 bail!("Password mismatch, aborting...");
             }
+
             let wallet = Wallet::create(wallet_name, mint, password)?;
 
             repl::start(wallet)?;
