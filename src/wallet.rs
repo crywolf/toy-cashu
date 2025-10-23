@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::file;
@@ -120,6 +120,11 @@ struct Password;
 
 impl Password {
     fn is_valid_for_wallet(password: &str, wallet_name: &str) -> Result<bool> {
+        use argon2::{
+            Argon2,
+            password_hash::{PasswordHash, PasswordVerifier},
+        };
+
         let mut filename = wallet_name.to_string();
         filename.push_str(".pw");
 
@@ -131,7 +136,11 @@ impl Password {
         file.read_to_string(&mut pwd_hash)
             .context("read pwd hash from file")?;
 
-        if password_auth::verify_password(password, &pwd_hash).is_ok() {
+        let parsed_hash = PasswordHash::new(&pwd_hash)?;
+        if Argon2::default()
+            .verify_password(password.as_bytes(), &parsed_hash)
+            .is_ok()
+        {
             return Ok(true);
         }
 
@@ -139,7 +148,18 @@ impl Password {
     }
 
     fn save(wallet_name: &str, password: &str) -> Result<()> {
-        let pwd_hash = password_auth::generate_hash(password);
+        use argon2::{
+            Argon2,
+            password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
+        };
+        let salt = SaltString::generate(&mut OsRng);
+
+        let argon2 = Argon2::default();
+
+        // Hash password to PHC string ($argon2id$v=19$...)
+        let pwd_hash = argon2
+            .hash_password(password.as_bytes(), &salt)?
+            .to_string();
 
         let mut filename = wallet_name.to_string();
         filename.push_str(".pw");
@@ -164,9 +184,11 @@ impl Password {
         let salt = wallet_name.repeat(3);
 
         let mut encryption_key = [0u8; 32];
-        argon2::Argon2::default()
-            .hash_password_into(password.as_bytes(), salt.as_bytes(), &mut encryption_key)
-            .map_err(|e| anyhow!(e.to_string()))?;
+        argon2::Argon2::default().hash_password_into(
+            password.as_bytes(),
+            salt.as_bytes(),
+            &mut encryption_key,
+        )?;
 
         Ok(encryption_key)
     }
