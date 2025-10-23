@@ -56,9 +56,9 @@ impl Wallet {
             bail!("Wallet {} already exists!", name);
         }
 
-        Password::save(name, password)?;
+        password::save(name, password)?;
 
-        let encryption_key = Password::derive_encryption_key(password, name)?;
+        let encryption_key = password::derive_encryption_key(password, name)?;
 
         let w = Self {
             name: name.to_owned(),
@@ -80,7 +80,7 @@ impl Wallet {
             bail!("Wallet {} does not exist!", name);
         }
 
-        if !Password::is_valid_for_wallet(password, name).context("validate password")? {
+        if !password::is_valid_for_wallet(password, name).context("validate password")? {
             bail!("Invalid password!");
         }
 
@@ -93,7 +93,7 @@ impl Wallet {
     }
 
     fn load(name: &str, password: &str) -> Result<Self> {
-        let decryption_key = Password::derive_encryption_key(password, name)?;
+        let decryption_key = password::derive_encryption_key(password, name)?;
 
         let path = PathBuf::from(WALLETS_DIR).join(Self::filename(name));
         let mut w = file::load(path.as_path(), &decryption_key).context("load wallet file")?;
@@ -116,15 +116,16 @@ impl Wallet {
     }
 }
 
-struct Password;
+mod password {
+    use super::*;
 
-impl Password {
-    fn is_valid_for_wallet(password: &str, wallet_name: &str) -> Result<bool> {
-        use argon2::{
-            Argon2,
-            password_hash::{PasswordHash, PasswordVerifier},
-        };
+    use argon2::{
+        Argon2,
+        password_hash::{PasswordHash, PasswordVerifier},
+        password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
+    };
 
+    pub(crate) fn is_valid_for_wallet(password: &str, wallet_name: &str) -> Result<bool> {
         let mut filename = wallet_name.to_string();
         filename.push_str(".pw");
 
@@ -147,11 +148,7 @@ impl Password {
         Ok(false)
     }
 
-    fn save(wallet_name: &str, password: &str) -> Result<()> {
-        use argon2::{
-            Argon2,
-            password_hash::{PasswordHasher, SaltString, rand_core::OsRng},
-        };
+    pub(crate) fn save(wallet_name: &str, password: &str) -> Result<()> {
         let salt = SaltString::generate(&mut OsRng);
 
         let argon2 = Argon2::default();
@@ -180,11 +177,11 @@ impl Password {
         Ok(())
     }
 
-    fn derive_encryption_key(password: &str, wallet_name: &str) -> Result<[u8; 32]> {
+    pub(crate) fn derive_encryption_key(password: &str, wallet_name: &str) -> Result<[u8; 32]> {
         let salt = wallet_name.repeat(3);
 
         let mut encryption_key = [0u8; 32];
-        argon2::Argon2::default().hash_password_into(
+        Argon2::default().hash_password_into(
             password.as_bytes(),
             salt.as_bytes(),
             &mut encryption_key,
