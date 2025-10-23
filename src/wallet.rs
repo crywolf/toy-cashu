@@ -4,19 +4,21 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::file;
 
 const WALLETS_DIR: &str = ".wallets";
-const WALLET_FILE_EXT: &str = ".json";
+const WALLET_FILE_EXT: &str = ".bin";
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Wallet {
     pub name: String,
     mint: String,
     proofs: Vec<String>,
+    #[serde(skip)]
+    encryption_key: [u8; 32],
 }
 
 impl Wallet {
@@ -56,16 +58,18 @@ impl Wallet {
 
         Password::save(name, password)?;
 
+        let encryption_key = Password::derive_encryption_key(password, name)?;
+
         let w = Self {
             name: name.to_owned(),
             mint: mint.to_owned(),
             proofs: vec![],
+            encryption_key,
         };
 
         w.save()
             .with_context(|| format!("save newly created wallet '{}'", name))?;
 
-        let w = Self::load(name).with_context(|| format!("load wallet {}", name))?;
         Ok(w)
     }
 
@@ -80,7 +84,7 @@ impl Wallet {
             bail!("Invalid password!");
         }
 
-        let w = Self::load(name).with_context(|| format!("load wallet {}", name))?;
+        let w = Self::load(name, password).with_context(|| format!("load wallet {}", name))?;
         Ok(w)
     }
 
@@ -88,15 +92,20 @@ impl Wallet {
         self.proofs.len() // TODO
     }
 
-    fn load(name: &str) -> Result<Self> {
+    fn load(name: &str, password: &str) -> Result<Self> {
+        let decryption_key = Password::derive_encryption_key(password, name)?;
+
         let path = PathBuf::from(WALLETS_DIR).join(Self::filename(name));
-        let w = file::load(path.as_path()).context("load wallet file")?;
+        let mut w = file::load(path.as_path(), &decryption_key).context("load wallet file")?;
+
+        w.encryption_key = decryption_key;
+
         Ok(w)
     }
 
     fn save(&self) -> Result<()> {
         let path = PathBuf::from(WALLETS_DIR).join(Self::filename(&self.name));
-        file::save(self, path.as_path()).context("save wallet file")?;
+        file::save(self, path.as_path(), &self.encryption_key).context("save wallet file")?;
         Ok(())
     }
 
@@ -149,5 +158,16 @@ impl Password {
             .context("write password hash to file")?;
 
         Ok(())
+    }
+
+    fn derive_encryption_key(password: &str, wallet_name: &str) -> Result<[u8; 32]> {
+        let salt = wallet_name.repeat(3);
+
+        let mut encryption_key = [0u8; 32];
+        argon2::Argon2::default()
+            .hash_password_into(password.as_bytes(), salt.as_bytes(), &mut encryption_key)
+            .map_err(|e| anyhow!(e.to_string()))?;
+
+        Ok(encryption_key)
     }
 }
