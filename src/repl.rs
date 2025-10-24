@@ -21,7 +21,7 @@ pub fn start(wallet: Wallet) -> Result<()> {
                 }
             }
             Err(err) => {
-                write!(std::io::stdout(), "{err}")?;
+                writeln!(std::io::stdout(), "{err:?}")?;
                 std::io::stdout().flush()?;
             }
         }
@@ -43,15 +43,27 @@ impl Repl {
                 writeln!(std::io::stdout(), "{}", self.wallet.balance())?;
                 std::io::stdout().flush()?;
             }
+            Command::WalletInfo => {
+                let w = &self.wallet;
+                writeln!(std::io::stdout(), "name: {}, mint: {}", w.name, w.mint())?;
+                std::io::stdout().flush()?;
+            }
+            Command::MintInfo => {
+                writeln!(std::io::stdout(), "{}", self.wallet.mint_info()?)?;
+                std::io::stdout().flush()?;
+            }
+            Command::MintKeys => {
+                writeln!(std::io::stdout(), "{:#?}", self.wallet.mint_keys()?)?;
+                std::io::stdout().flush()?;
+            }
+            Command::MintKeysets => {
+                writeln!(std::io::stdout(), "{:#?}", self.wallet.mint_keysets()?)?;
+                std::io::stdout().flush()?;
+            }
             Command::Exit | Command::Quit => {
                 writeln!(std::io::stdout(), "Exiting ...")?;
                 std::io::stdout().flush()?;
                 return Ok(true);
-            }
-            Command::MintInfo => todo!(),
-            Command::WalletInfo => {
-                writeln!(std::io::stdout(), "{:?}", self.wallet)?;
-                std::io::stdout().flush()?;
             }
         }
         Ok(false)
@@ -82,6 +94,12 @@ enum Command {
     WalletInfo,
     /// Get info about mint
     MintInfo,
+    /// Get mint keys
+    #[command(name = "keys")]
+    MintKeys,
+    /// Get mint keysets
+    #[command(name = "keysets")]
+    MintKeysets,
     Exit,
     Quit,
 }

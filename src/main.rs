@@ -6,6 +6,7 @@ use crate::wallet::Wallet;
 
 mod cli;
 mod file;
+mod mint;
 mod repl;
 mod wallet;
 

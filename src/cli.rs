@@ -20,7 +20,7 @@ pub enum Command {
     Create {
         /// Wallet name
         wallet_name: String,
-        /// Mint URI
+        /// Mint URL
         mint: String,
     },
 }

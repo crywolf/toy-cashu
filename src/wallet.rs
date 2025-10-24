@@ -7,15 +7,19 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::file;
+use crate::{
+    file,
+    mint::{Keys, Keysets, Mint},
+};
 
 const WALLETS_DIR: &str = ".wallets";
 const WALLET_FILE_EXT: &str = ".bin";
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Wallet {
     pub name: String,
-    mint: String,
+    #[serde(flatten)]
+    mint: Mint,
     proofs: Vec<String>,
     #[serde(skip)]
     encryption_key: [u8; 32],
@@ -62,7 +66,7 @@ impl Wallet {
 
         let w = Self {
             name: name.to_owned(),
-            mint: mint.to_owned(),
+            mint: Mint::new(mint)?,
             proofs: vec![],
             encryption_key,
         };
@@ -86,6 +90,22 @@ impl Wallet {
 
         let w = Self::load(name, password).with_context(|| format!("load wallet {}", name))?;
         Ok(w)
+    }
+
+    pub fn mint(&self) -> String {
+        self.mint.url()
+    }
+
+    pub fn mint_info(&self) -> Result<String> {
+        self.mint.get_info()
+    }
+
+    pub fn mint_keys(&self) -> Result<Keys> {
+        self.mint.get_keys()
+    }
+
+    pub fn mint_keysets(&self) -> Result<Keysets> {
+        self.mint.get_keysets()
     }
 
     pub fn balance(&self) -> usize {
