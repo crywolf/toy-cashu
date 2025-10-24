@@ -21,7 +21,7 @@ pub enum Command {
         /// Wallet name
         wallet_name: String,
         /// Mint URL
-        mint: String,
+        mint: reqwest::Url,
     },
 }
 

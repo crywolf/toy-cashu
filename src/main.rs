@@ -30,7 +30,7 @@ fn main() -> anyhow::Result<()> {
                 bail!("Password mismatch, aborting...");
             }
 
-            let wallet = Wallet::create(wallet_name, mint, password)?;
+            let wallet = Wallet::create(wallet_name, mint.as_str(), password)?;
 
             repl::start(wallet)?;
         }
