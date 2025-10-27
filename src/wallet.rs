@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     file,
-    mint::{Keys, Keysets, Mint},
+    mint::{Keys, Keysets, Mint, MintInfo},
 };
 
 const WALLETS_DIR: &str = ".wallets";
@@ -96,7 +96,7 @@ impl Wallet {
         self.mint.url()
     }
 
-    pub fn mint_info(&self) -> Result<String> {
+    pub fn mint_info(&mut self) -> Result<&MintInfo> {
         self.mint.get_info()
     }
 

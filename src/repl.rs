@@ -6,15 +6,15 @@ use clap::{Parser, Subcommand};
 use crate::wallet::Wallet;
 
 pub fn start(wallet: Wallet) -> Result<()> {
-    let wallet = Repl { wallet };
+    let mut repl = Repl { wallet };
     loop {
-        let line = wallet.readline()?;
+        let line = repl.readline()?;
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
 
-        match wallet.respond(line) {
+        match repl.respond(line) {
             Ok(quit) => {
                 if quit {
                     break;
@@ -35,7 +35,7 @@ struct Repl {
 }
 
 impl Repl {
-    fn respond(&self, line: &str) -> Result<bool> {
+    fn respond(&mut self, line: &str) -> Result<bool> {
         let args = line.split_whitespace();
         let cli = Cli::try_parse_from(args)?;
         match cli.command {
@@ -49,7 +49,13 @@ impl Repl {
                 std::io::stdout().flush()?;
             }
             Command::MintInfo => {
-                writeln!(std::io::stdout(), "{}", self.wallet.mint_info()?)?;
+                let info = self.wallet.mint_info()?;
+                writeln!(
+                    std::io::stdout(),
+                    "name: {}, pubkey: {}",
+                    info.name,
+                    info.pubkey
+                )?;
                 std::io::stdout().flush()?;
             }
             Command::MintKeys => {

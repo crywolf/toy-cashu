@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
-use anyhow::{Ok, Result};
+use anyhow::Result;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
@@ -8,8 +8,16 @@ use serde::{Deserialize, Serialize};
 pub struct Mint {
     #[serde(rename = "mint")]
     url: Url,
+    #[serde(skip)]
+    info: Option<MintInfo>,
     #[serde(skip, default = "reqwest::blocking::Client::new")]
     http: reqwest::blocking::Client,
+}
+
+#[derive(Deserialize)]
+pub struct MintInfo {
+    pub name: String,
+    pub pubkey: String,
 }
 
 impl Mint {
@@ -17,17 +25,25 @@ impl Mint {
         let url = Url::parse(url)?;
         let c = reqwest::blocking::Client::new();
 
-        Ok(Self { url, http: c })
+        Ok(Self {
+            url,
+            info: None,
+            http: c,
+        })
     }
 
     pub fn url(&self) -> String {
         self.url.to_string()
     }
 
-    pub fn get_info(&self) -> Result<String> {
-        let r = self.http.get(self.url.join("/v1/info")?).send()?;
-        let info = r.text()?;
-        Ok(info)
+    pub fn get_info(&mut self) -> Result<&MintInfo> {
+        if self.info.is_none() {
+            let r = self.http.get(self.url.join("/v1/info")?).send()?;
+            let info: MintInfo = r.json()?;
+            self.info = Some(info);
+        }
+
+        Ok(self.info.as_ref().expect("info was downloaded"))
     }
 
     pub fn get_keys(&self) -> Result<Keys> {
@@ -54,7 +70,7 @@ pub struct Keys {
 pub struct Keyset {
     id: String,
     unit: String,
-    keys: HashMap<u64, String>,
+    keys: BTreeMap<u64, String>,
 }
 
 #[allow(dead_code)]
