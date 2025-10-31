@@ -52,8 +52,9 @@ impl Repl {
                 let info = self.wallet.mint_info()?;
                 writeln!(
                     std::io::stdout(),
-                    "name: {}, pubkey: {}",
+                    "name: {}, url: {}, pubkey: {}",
                     info.name,
+                    info.url,
                     info.pubkey
                 )?;
                 std::io::stdout().flush()?;
@@ -63,8 +64,12 @@ impl Repl {
                 std::io::stdout().flush()?;
             }
             Command::MintKeysets => {
-                writeln!(std::io::stdout(), "{:#?}", self.wallet.mint_keysets()?)?;
+                writeln!(std::io::stdout(), "{:#?}", self.wallet.mint_keysets(false)?)?;
                 std::io::stdout().flush()?;
+            }
+            Command::MintTokens { sats } => {
+                self.wallet.mint_tokens(sats)?;
+                // TODO print something
             }
             Command::Exit | Command::Quit => {
                 writeln!(std::io::stdout(), "Exiting ...")?;
@@ -106,6 +111,12 @@ enum Command {
     /// Get mint keysets
     #[command(name = "keysets")]
     MintKeysets,
+    /// Mint tokens
+    #[command(name = "mint")]
+    MintTokens {
+        /// Amount in sats
+        sats: u64,
+    },
     Exit,
     Quit,
 }

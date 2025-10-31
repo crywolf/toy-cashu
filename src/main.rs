@@ -4,6 +4,7 @@ use rpassword::prompt_password;
 use crate::cli::Command;
 use crate::wallet::Wallet;
 
+mod cashu;
 mod cli;
 mod file;
 mod mint;

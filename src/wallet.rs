@@ -1,16 +1,20 @@
 use std::{
+    collections::BTreeMap,
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    file,
-    mint::{Keys, Keysets, Mint, MintInfo},
+use crate::cashu::{
+    BlindedMessage, BlindedSecret, Proof,
+    crypto::{PublicKey, Secret, SecretKey},
+    types::{Keys, Keysets, MintQuote, QuoteState},
 };
+use crate::file;
+use crate::mint::{Mint, MintInfo};
 
 const WALLETS_DIR: &str = ".wallets";
 const WALLET_FILE_EXT: &str = ".bin";
@@ -20,7 +24,9 @@ pub struct Wallet {
     pub name: String,
     #[serde(flatten)]
     mint: Mint,
-    proofs: Vec<String>,
+    proofs: Vec<Proof>,
+    #[serde(skip)]
+    mint_quotes: Vec<MintQuote>,
     #[serde(skip)]
     encryption_key: [u8; 32],
 }
@@ -68,6 +74,7 @@ impl Wallet {
             name: name.to_owned(),
             mint: Mint::new(mint)?,
             proofs: vec![],
+            mint_quotes: vec![],
             encryption_key,
         };
 
@@ -96,20 +103,142 @@ impl Wallet {
         self.mint.url()
     }
 
-    pub fn mint_info(&mut self) -> Result<&MintInfo> {
-        self.mint.get_info()
+    pub fn mint_info(&mut self) -> Result<MintInfo> {
+        let mut info = self.mint.get_info().cloned()?;
+        info.url = self.mint();
+        Ok(info)
     }
 
     pub fn mint_keys(&self) -> Result<Keys> {
         self.mint.get_keys()
     }
 
-    pub fn mint_keysets(&self) -> Result<Keysets> {
-        self.mint.get_keysets()
+    pub fn mint_keysets(&self, only_active: bool) -> Result<Keysets> {
+        let mut ks = self.mint.get_keysets().context("get_keysets")?;
+        if only_active {
+            let ks_vec = ks
+                .keysets
+                .into_iter()
+                .filter(|s| s.active)
+                .collect::<Vec<_>>();
+            ks.keysets = ks_vec;
+        }
+        Ok(ks)
     }
 
-    pub fn balance(&self) -> usize {
-        self.proofs.len() // TODO
+    pub fn mint_tokens(&mut self, amount: u64) -> Result<()> {
+        let quote = self.create_mint_quote(amount)?;
+
+        let quote_id = quote.quote.clone();
+        let unit = quote.unit.clone();
+
+        // TODO store quote and request the mint later for its state
+        self.mint_quotes.push(quote);
+
+        // loop
+        let quote = self.check_mint_quote(&quote_id)?;
+        let invoice_state = quote.state;
+
+        if invoice_state == QuoteState::Issued {
+            bail!("Tokens from the quote {} were already issued", quote_id);
+        }
+
+        if invoice_state == QuoteState::Paid {
+            let amounts = Self::split_amount(amount);
+
+            let active_keysets = self.mint_keysets(true)?;
+
+            let active_ks_for_sats = active_keysets.keysets.into_iter().find(|s| s.unit == unit);
+            if let Some(active_key_set) = active_ks_for_sats {
+                let keyset_id = active_key_set.id;
+                let active_keys = self.mint_keys()?;
+                let active_keyset = active_keys
+                    .by_id(keyset_id.clone())
+                    .ok_or(anyhow!("Mint did not provided active keys"))?;
+
+                let active_keys = active_keyset.keys;
+
+                let mut outputs = vec![];
+                let mut minting_secrets: BTreeMap<u64, MintSecret> = BTreeMap::new();
+
+                for amount in amounts {
+                    let secret = Secret::generate();
+
+                    let (b_, r) = BlindedSecret::from_bytes(secret.as_bytes())?;
+
+                    let blinded_message = BlindedMessage::new(amount, &keyset_id, b_.clone());
+                    outputs.push(blinded_message);
+
+                    minting_secrets.insert(amount, MintSecret { secret, r });
+                }
+
+                let blind_signatures = self.mint.do_minting(quote_id, outputs)?;
+
+                let promises = blind_signatures.signatures;
+
+                for promise in promises {
+                    let amount = &promise.amount;
+                    let amount_key = active_keys
+                        .get(amount)
+                        .ok_or(anyhow!("Mint error: key for amount does not exist"))?
+                        .clone();
+
+                    let minting_secret = minting_secrets
+                        .get(amount)
+                        .ok_or(anyhow!("Missing secret for amount: {}", amount))?;
+
+                    let r = &minting_secret.r;
+                    let amount_pubkey = &PublicKey::from_hex(amount_key)?;
+                    let secret = &minting_secret.secret;
+                    let proof = promise
+                        .construct_proof(r, amount_pubkey, secret)
+                        .context("construct proof")?;
+                    self.proofs.push(proof);
+                }
+
+                self.save()?;
+            } else {
+                bail!("No active keyset");
+            }
+        } else {
+            bail!("Invoice not paid");
+        }
+
+        Ok(())
+    }
+
+    pub fn balance(&self) -> u64 {
+        self.proofs.iter().fold(0, |acc, x| acc + x.amount)
+    }
+
+    fn create_mint_quote(&self, amount: u64) -> Result<MintQuote> {
+        let quote = self
+            .mint
+            .create_mint_quote(amount)
+            .context("create_mint_quote")?;
+        Ok(quote)
+    }
+
+    fn check_mint_quote(&self, quote_id: &str) -> Result<MintQuote> {
+        let quote = self
+            .mint
+            .get_mint_quote(quote_id)
+            .context("get_mint_quote")?;
+        Ok(quote)
+    }
+
+    fn split_amount(amount: u64) -> Vec<u64> {
+        let amounts = (0..32).map(|x| 2u64.pow(x)).collect::<Vec<_>>();
+        amounts
+            .iter()
+            .rev()
+            .fold((Vec::new(), amount), |(mut acc, total), &amount| {
+                if total >= amount {
+                    acc.push(amount);
+                }
+                (acc, total % amount)
+            })
+            .0
     }
 
     fn load(name: &str, password: &str) -> Result<Self> {
@@ -134,6 +263,19 @@ impl Wallet {
         filename.push_str(WALLET_FILE_EXT);
         filename
     }
+}
+
+#[expect(dead_code)]
+#[derive(Default, Debug)]
+struct MintSecrets {
+    keyset_id: String,
+    secrets: Vec<MintSecret>,
+}
+
+#[derive(Debug)]
+struct MintSecret {
+    pub secret: Secret,
+    pub r: SecretKey,
 }
 
 mod password {
@@ -208,5 +350,19 @@ mod password {
         )?;
 
         Ok(encryption_key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_amount() {
+        assert_eq!(Wallet::split_amount(1), vec![1]);
+        assert_eq!(Wallet::split_amount(2), vec![2]);
+        assert_eq!(Wallet::split_amount(3), vec![2, 1]);
+        assert_eq!(Wallet::split_amount(11), vec![8, 2, 1]);
+        assert_eq!(Wallet::split_amount(255), vec![128, 64, 32, 16, 8, 4, 2, 1]);
     }
 }

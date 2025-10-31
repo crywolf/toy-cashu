@@ -1,9 +1,13 @@
-use std::collections::BTreeMap;
-
-use anyhow::Result;
+use anyhow::{Result, bail};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
+use crate::cashu::{
+    BlindSignatures, BlindedMessage,
+    types::{Keys, Keysets, MintQuote},
+};
+
+/// Mint object represents remote mint. Used by [`super::Wallet`] to communicate with mint server specified by its `url`.
 #[derive(Deserialize, Serialize)]
 pub struct Mint {
     #[serde(rename = "mint")]
@@ -14,9 +18,11 @@ pub struct Mint {
     http: reqwest::blocking::Client,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct MintInfo {
     pub name: String,
+    #[serde(skip)]
+    pub url: String,
     pub pubkey: String,
 }
 
@@ -36,6 +42,7 @@ impl Mint {
         self.url.to_string()
     }
 
+    /// NUT-06: Mint information
     pub fn get_info(&mut self) -> Result<&MintInfo> {
         if self.info.is_none() {
             let r = self.http.get(self.url.join("/v1/info")?).send()?;
@@ -46,45 +53,96 @@ impl Mint {
         Ok(self.info.as_ref().expect("info was downloaded"))
     }
 
+    /// NUT-01: Mint public key exchange
     pub fn get_keys(&self) -> Result<Keys> {
         let r = self.http.get(self.url.join("/v1/keys")?).send()?;
         let keys: Keys = r.json()?;
         Ok(keys)
     }
 
+    /// NUT-02: Keysets and fees
     pub fn get_keysets(&self) -> Result<Keysets> {
         let r = self.http.get(self.url.join("/v1/keysets")?).send()?;
         let keysets: Keysets = r.json()?;
         Ok(keysets)
     }
-}
 
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-pub struct Keys {
-    keysets: Vec<Keyset>,
-}
+    /// NUT-23: BOLT11
+    pub fn create_mint_quote(&self, amount: u64) -> Result<MintQuote> {
+        #[derive(Serialize)]
+        struct QuoteRequest {
+            amount: u64,
+            unit: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            pubkey: Option<String>,
+        }
 
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-pub struct Keyset {
-    id: String,
-    unit: String,
-    keys: BTreeMap<u64, String>,
-}
+        let payment_method = "bolt11";
+        let req = QuoteRequest {
+            amount,
+            unit: "sat".to_owned(),
+            pubkey: None,
+        };
 
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-pub struct Keysets {
-    keysets: Vec<KeysetInfo>,
-}
+        let r = self
+            .http
+            .post(self.url.join(&format!("/v1/mint/quote/{payment_method}"))?)
+            .json(&req)
+            .send()?;
 
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-pub struct KeysetInfo {
-    id: String,
-    unit: String,
-    active: bool,
-    #[serde(default)]
-    input_fee_ppk: u64,
+        if r.status().is_success() {
+            Ok(r.json()?)
+        } else {
+            bail!("Response: {} \n  {}", r.status(), r.text()?);
+        }
+    }
+
+    pub fn get_mint_quote(&self, quote_id: &str) -> Result<MintQuote> {
+        let payment_method = "bolt11";
+
+        let r = self
+            .http
+            .get(
+                self.url
+                    .join(&format!("/v1/mint/quote/{payment_method}/{quote_id}"))?,
+            )
+            .send()?;
+
+        if r.status().is_success() {
+            Ok(r.json()?)
+        } else {
+            bail!("Response: {} \n  {}", r.status(), r.text()?);
+        }
+    }
+
+    // NUT-04: Mint tokens
+    pub fn do_minting(
+        &self,
+        quote_id: String,
+        outputs: Vec<BlindedMessage>,
+    ) -> Result<BlindSignatures> {
+        #[derive(Serialize)]
+        struct MintRequest {
+            quote: String,
+            outputs: Vec<BlindedMessage>,
+        }
+
+        let payment_method = "bolt11";
+        let req = MintRequest {
+            quote: quote_id,
+            outputs,
+        };
+
+        let r = self
+            .http
+            .post(self.url.join(&format!("/v1/mint/{payment_method}"))?)
+            .json(&req)
+            .send()?;
+
+        if r.status().is_success() {
+            Ok(r.json()?)
+        } else {
+            bail!("Response: {} \n  {}", r.status(), r.text()?);
+        }
+    }
 }
