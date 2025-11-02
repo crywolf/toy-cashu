@@ -105,7 +105,7 @@ pub struct BlindSignatures {
     pub signatures: Vec<BlindSignature>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Proof {
     pub amount: u64,
     /// keyset ID of the mint keys that signed the token

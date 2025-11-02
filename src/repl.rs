@@ -40,19 +40,23 @@ impl Repl {
         let cli = Cli::try_parse_from(args)?;
         match cli.command {
             Command::Balance => {
-                writeln!(std::io::stdout(), "{}", self.wallet.balance())?;
+                writeln!(std::io::stdout(), "  Total: {}", self.wallet.balance())?;
+                let mut amounts = self.wallet.proofs().map(|p| p.amount).collect::<Vec<_>>();
+                amounts.sort();
+                amounts.reverse();
+                writeln!(std::io::stdout(), "  Amounts: {:?}", amounts)?;
                 std::io::stdout().flush()?;
             }
             Command::WalletInfo => {
                 let w = &self.wallet;
-                writeln!(std::io::stdout(), "name: {}, mint: {}", w.name, w.mint())?;
+                writeln!(std::io::stdout(), "  name: {}, mint: {}", w.name, w.mint())?;
                 std::io::stdout().flush()?;
             }
             Command::MintInfo => {
                 let info = self.wallet.mint_info()?;
                 writeln!(
                     std::io::stdout(),
-                    "name: {}, url: {}, pubkey: {}",
+                    "  name: {}, url: {}, pubkey: {}",
                     info.name,
                     info.url,
                     info.pubkey
@@ -68,12 +72,38 @@ impl Repl {
                 std::io::stdout().flush()?;
             }
             Command::MintTokens { sats } => {
-                self.wallet.mint_tokens(sats)?;
-                // TODO print something
-            }
-            Command::Exit | Command::Quit => {
-                writeln!(std::io::stdout(), "Exiting ...")?;
+                let mut amounts = self.wallet.mint_tokens(sats)?;
+                amounts.sort();
+                amounts.reverse();
+                writeln!(std::io::stdout(), "  Minted amounts: {:?}", amounts)?;
                 std::io::stdout().flush()?;
+            }
+            Command::SwapTokens { input, outputs } => {
+                write!(std::io::stdout(), "  Confirm swap: ")?;
+                writeln!(std::io::stdout(), "{:?} -> {:?}", input, outputs)?;
+                write!(std::io::stdout(), "  (y/n): ")?;
+                std::io::stdout().flush()?;
+
+                let mut buf = String::new();
+                std::io::stdin().read_line(&mut buf)?;
+                let buf = buf.trim().to_lowercase();
+                if !buf.starts_with("y") {
+                    writeln!(std::io::stdout(), "  Swap cancelled")?;
+                    return Ok(false);
+                }
+
+                self.wallet.swap_tokens(input, &outputs)?;
+
+                writeln!(
+                    std::io::stdout(),
+                    "  Swap {:?} -> {:?} finished successfully",
+                    input,
+                    outputs
+                )?;
+                std::io::stdout().flush()?;
+            }
+
+            Command::Exit | Command::Quit => {
                 return Ok(true);
             }
         }
@@ -116,6 +146,16 @@ enum Command {
     MintTokens {
         /// Amount in sats
         sats: u64,
+    },
+    /// Swap tokens
+    #[command(name = "swap")]
+    SwapTokens {
+        /// Inputs in sats
+        #[arg(short, long, required = true)]
+        input: u64,
+        /// Outputs in sats
+        #[arg(short, long, required = true)]
+        outputs: Vec<u64>,
     },
     Exit,
     Quit,

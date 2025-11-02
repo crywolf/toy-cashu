@@ -3,7 +3,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
 use crate::cashu::{
-    BlindSignatures, BlindedMessage,
+    BlindSignatures, BlindedMessage, Proof,
     types::{Keys, Keysets, MintQuote},
 };
 
@@ -136,6 +136,32 @@ impl Mint {
         let r = self
             .http
             .post(self.url.join(&format!("/v1/mint/{payment_method}"))?)
+            .json(&req)
+            .send()?;
+
+        if r.status().is_success() {
+            Ok(r.json()?)
+        } else {
+            bail!("Response: {} \n  {}", r.status(), r.text()?);
+        }
+    }
+
+    // NUT-03: Swap tokens
+    pub fn do_swap(
+        &self,
+        inputs: Vec<Proof>,
+        outputs: Vec<BlindedMessage>,
+    ) -> Result<BlindSignatures> {
+        #[derive(Serialize)]
+        struct SwapRequest {
+            inputs: Vec<Proof>,
+            outputs: Vec<BlindedMessage>,
+        }
+        let req = SwapRequest { inputs, outputs };
+
+        let r = self
+            .http
+            .post(self.url.join("/v1/swap")?)
             .json(&req)
             .send()?;
 
