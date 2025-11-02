@@ -155,65 +155,63 @@ impl Wallet {
         if invoice_state == QuoteState::Paid {
             let amounts = Self::split_amount(amount);
 
-            let active_keysets = self.mint_keysets(true)?;
+            let active_keyset_info = self
+                .mint_keysets(true)?
+                .for_unit(&unit)
+                .ok_or(anyhow!("No active keyset for '{}'", unit))?;
+            let keyset_id = active_keyset_info.id;
 
-            let active_ks_for_sats = active_keysets.keysets.into_iter().find(|s| s.unit == unit);
-            if let Some(active_key_set) = active_ks_for_sats {
-                let keyset_id = active_key_set.id;
-                let active_keys = self.mint_keys()?;
-                let active_keyset = active_keys
-                    .by_id(keyset_id.clone())
-                    .ok_or(anyhow!("Mint did not provided active keys"))?;
+            let active_keyset = self
+                .mint_keys()?
+                .by_id(&keyset_id)
+                .ok_or(anyhow!("Mint did not provided active keys"))?;
 
-                let active_keys = active_keyset.keys;
+            let active_keys = active_keyset.keys;
 
-                let mut outputs = vec![];
-                let mut minting_secrets: BTreeMap<u64, MintSecret> = BTreeMap::new();
+            let mut outputs = vec![];
+            let mut minting_secrets: BTreeMap<u64, MintSecret> = BTreeMap::new();
 
-                for amount in amounts {
-                    let secret = Secret::generate();
+            for amount in amounts {
+                let secret = Secret::generate();
 
-                    let (b_, r) = BlindedSecret::from_bytes(secret.as_bytes())?;
+                let (b_, r) = BlindedSecret::from_bytes(secret.as_bytes())?;
 
-                    let blinded_message = BlindedMessage::new(amount, &keyset_id, b_.clone());
-                    outputs.push(blinded_message);
+                let blinded_message = BlindedMessage::new(amount, &keyset_id, b_.clone());
+                outputs.push(blinded_message);
 
-                    minting_secrets.insert(amount, MintSecret { secret, r });
-                }
-
-                let blind_signatures = self.mint.do_minting(quote_id, outputs)?;
-
-                let promises = blind_signatures.signatures;
-
-                let mut minted_amounts = vec![];
-                for promise in promises {
-                    let amount = &promise.amount;
-                    let amount_key = active_keys
-                        .get(amount)
-                        .ok_or(anyhow!("Mint error: key for amount does not exist"))?
-                        .clone();
-
-                    let minting_secret = minting_secrets
-                        .get(amount)
-                        .ok_or(anyhow!("Missing secret for amount: {}", amount))?;
-
-                    let r = &minting_secret.r;
-                    let amount_pubkey = &PublicKey::from_hex(amount_key)?;
-                    let secret = &minting_secret.secret;
-                    let proof = promise
-                        .construct_proof(r, amount_pubkey, secret)
-                        .context("construct proof")?;
-                    self.proofs.push(proof);
-
-                    minted_amounts.push(*amount);
-                }
-
-                self.save()?;
-
-                Ok(minted_amounts)
-            } else {
-                bail!("No active keyset");
+                minting_secrets.insert(amount, MintSecret { secret, r });
             }
+
+            let blind_signatures = self.mint.do_minting(quote_id, outputs)?;
+
+            let promises = blind_signatures.signatures;
+
+            let mut minted_amounts = vec![];
+            for promise in promises {
+                let amount = &promise.amount;
+                let amount_key = active_keys
+                    .get(amount)
+                    .ok_or(anyhow!("Mint error: key for amount does not exist"))?
+                    .clone();
+
+                let minting_secret = minting_secrets
+                    .get(amount)
+                    .ok_or(anyhow!("Missing secret for amount: {}", amount))?;
+
+                let r = &minting_secret.r;
+                let amount_pubkey = &PublicKey::from_hex(amount_key)?;
+                let secret = &minting_secret.secret;
+                let proof = promise
+                    .construct_proof(r, amount_pubkey, secret)
+                    .context("construct proof")?;
+                self.proofs.push(proof);
+
+                minted_amounts.push(*amount);
+            }
+
+            self.save()?;
+
+            Ok(minted_amounts)
         } else {
             bail!("Invoice not paid");
         }
@@ -229,68 +227,69 @@ impl Wallet {
 
         let inputs = vec![proof.clone()];
 
-        let input_unit = "sat"; // TODO
+        let proof_keyset_id = proof.keyset_id.clone();
 
-        let active_keysets = self.mint_keysets(true)?;
+        let proof_keyset = self
+            .mint_keysets(false)?
+            .by_id(&proof_keyset_id)
+            .ok_or(anyhow!("Missing keyset {}", proof_keyset_id))?;
+        let proof_unit = &proof_keyset.unit;
 
-        let active_ks_for_sats = active_keysets
-            .keysets
-            .into_iter()
-            .find(|s| s.unit == input_unit);
-        if let Some(active_key_set) = active_ks_for_sats {
-            let keyset_id = active_key_set.id;
-            let active_keys = self.mint_keys()?;
-            let active_keyset = active_keys
-                .by_id(keyset_id.clone())
-                .ok_or(anyhow!("Mint did not provided active keys"))?;
+        let active_keyset_info = self
+            .mint_keysets(true)?
+            .for_unit(proof_unit)
+            .ok_or(anyhow!("No active keyset for '{}'", proof_unit))?;
+        let keyset_id = active_keyset_info.id;
 
-            let active_keys = active_keyset.keys;
+        let active_keyset = self
+            .mint_keys()?
+            .by_id(&keyset_id)
+            .ok_or(anyhow!("Mint did not provided active keys"))?;
 
-            let mut outputs = vec![];
-            let mut secrets = VecDeque::new();
+        let active_keys = active_keyset.keys;
 
-            for &amount in output_amounts {
-                let secret = Secret::generate();
+        let mut outputs = vec![];
+        let mut secrets = VecDeque::new();
 
-                let (b_, r) = BlindedSecret::from_bytes(secret.as_bytes())?;
+        for &amount in output_amounts {
+            let secret = Secret::generate();
 
-                let blinded_message = BlindedMessage::new(amount, &keyset_id, b_.clone());
-                outputs.push(blinded_message);
+            let (b_, r) = BlindedSecret::from_bytes(secret.as_bytes())?;
 
-                secrets.push_back(MintSecret { secret, r });
-            }
+            let blinded_message = BlindedMessage::new(amount, &keyset_id, b_.clone());
+            outputs.push(blinded_message);
 
-            let blind_signatures = self.mint.do_swap(inputs, outputs)?;
-
-            let promises = blind_signatures.signatures;
-
-            for promise in promises {
-                let amount = &promise.amount;
-                let amount_key = active_keys
-                    .get(amount)
-                    .ok_or(anyhow!("Mint error: key for amount does not exist"))?
-                    .clone();
-
-                let minting_secret = secrets
-                    .pop_front()
-                    .ok_or(anyhow!("Missing secret for amount: {}", amount))?;
-
-                let r = &minting_secret.r;
-                let amount_pubkey = &PublicKey::from_hex(amount_key)?;
-                let secret = &minting_secret.secret;
-                let proof = promise
-                    .construct_proof(r, amount_pubkey, secret)
-                    .context("construct proof")?;
-                self.proofs.push(proof);
-            }
-
-            // remove melted (swapped out) proof from wallet
-            self.proofs.remove(proof_index);
-
-            self.save()?;
-        } else {
-            bail!("No active keyset");
+            secrets.push_back(MintSecret { secret, r });
         }
+
+        let blind_signatures = self.mint.do_swap(inputs, outputs)?;
+
+        let promises = blind_signatures.signatures;
+
+        for promise in promises {
+            let amount = &promise.amount;
+            let amount_key = active_keys
+                .get(amount)
+                .ok_or(anyhow!("Mint error: key for amount does not exist"))?
+                .clone();
+
+            let minting_secret = secrets
+                .pop_front()
+                .ok_or(anyhow!("Missing secret for amount: {}", amount))?;
+
+            let r = &minting_secret.r;
+            let amount_pubkey = &PublicKey::from_hex(amount_key)?;
+            let secret = &minting_secret.secret;
+            let proof = promise
+                .construct_proof(r, amount_pubkey, secret)
+                .context("construct proof")?;
+            self.proofs.push(proof);
+        }
+
+        // remove melted (swapped out) proof from wallet
+        self.proofs.remove(proof_index);
+
+        self.save()?;
 
         Ok(())
     }

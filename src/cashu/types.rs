@@ -26,7 +26,7 @@ pub struct Keys {
 }
 
 impl Keys {
-    pub fn by_id(self, id: String) -> Option<Keyset> {
+    pub fn by_id(self, id: &str) -> Option<Keyset> {
         self.keysets.into_iter().find(|ks| ks.id == id)
     }
 }
@@ -42,6 +42,16 @@ pub struct Keyset {
 #[derive(Debug, Deserialize)]
 pub struct Keysets {
     pub keysets: Vec<KeysetInfo>,
+}
+
+impl Keysets {
+    pub fn for_unit(self, unit: &str) -> Option<KeysetInfo> {
+        self.keysets.into_iter().find(|s| s.unit == unit)
+    }
+
+    pub fn by_id(self, id: &str) -> Option<KeysetInfo> {
+        self.keysets.into_iter().find(|ks| ks.id == id)
+    }
 }
 
 #[expect(dead_code)]

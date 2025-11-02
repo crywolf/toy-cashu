@@ -102,7 +102,6 @@ impl Repl {
                 )?;
                 std::io::stdout().flush()?;
             }
-
             Command::Exit | Command::Quit => {
                 return Ok(true);
             }
