@@ -78,9 +78,9 @@ impl Repl {
                 writeln!(std::io::stdout(), "  Minted amounts: {:?}", amounts)?;
                 std::io::stdout().flush()?;
             }
-            Command::SwapTokens { input, outputs } => {
+            Command::SwapTokens { inputs, outputs } => {
                 write!(std::io::stdout(), "  Confirm swap: ")?;
-                writeln!(std::io::stdout(), "{:?} -> {:?}", input, outputs)?;
+                writeln!(std::io::stdout(), "{:?} -> {:?}", inputs, outputs)?;
                 write!(std::io::stdout(), "  (y/n): ")?;
                 std::io::stdout().flush()?;
 
@@ -92,12 +92,12 @@ impl Repl {
                     return Ok(false);
                 }
 
-                self.wallet.swap_tokens(input, &outputs)?;
+                self.wallet.swap_tokens(inputs.clone(), &outputs)?;
 
                 writeln!(
                     std::io::stdout(),
                     "  Swap {:?} -> {:?} finished successfully",
-                    input,
+                    inputs,
                     outputs
                 )?;
                 std::io::stdout().flush()?;
@@ -127,7 +127,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Display total balance
+    /// Display wallet balance
     Balance,
     /// Display wallet info
     #[command(name = "info")]
@@ -151,7 +151,7 @@ enum Command {
     SwapTokens {
         /// Inputs in sats
         #[arg(short, long, required = true)]
-        input: u64,
+        inputs: Vec<u64>,
         /// Outputs in sats
         #[arg(short, long, required = true)]
         outputs: Vec<u64>,

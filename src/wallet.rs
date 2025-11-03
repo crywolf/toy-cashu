@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -217,17 +217,47 @@ impl Wallet {
         }
     }
 
-    pub fn swap_tokens(&mut self, input_amount: u64, output_amounts: &[u64]) -> Result<()> {
-        let (proof_index, proof) = self
-            .proofs
-            .iter()
-            .enumerate()
-            .find(|(_, p)| p.amount == input_amount)
-            .ok_or(anyhow!("Missing proof for amount {}", input_amount))?;
+    pub fn swap_tokens(&mut self, input_amounts: Vec<u64>, output_amounts: &[u64]) -> Result<()> {
+        let mut amounts_counter = HashMap::<u64, usize>::new();
+        for &amount in input_amounts.iter() {
+            amounts_counter
+                .entry(amount)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+        }
 
-        let inputs = vec![proof.clone()];
+        let mut proofs_to_swap = vec![];
+        let mut proof_indexes_to_remove = vec![];
 
-        let proof_keyset_id = proof.keyset_id.clone();
+        let mut added_amounts_counter = HashMap::<u64, usize>::new();
+
+        for (i, proof) in self.proofs.iter().enumerate() {
+            if !amounts_counter.contains_key(&proof.amount) {
+                continue;
+            }
+
+            let added_count = added_amounts_counter
+                .entry(proof.amount)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+
+            if let Some(amount_count) = amounts_counter.get(&proof.amount)
+                && *added_count <= *amount_count
+            {
+                proofs_to_swap.push(proof.clone());
+                proof_indexes_to_remove.push(i);
+            }
+        }
+
+        if proofs_to_swap.len() < input_amounts.len() {
+            bail!("Could not find enough input proofs with specified amounts")
+        }
+
+        let proof_keyset_id = proofs_to_swap
+            .first()
+            .ok_or(anyhow!("No proofs to swap"))?
+            .keyset_id
+            .clone();
 
         let proof_keyset = self
             .mint_keysets(false)?
@@ -262,10 +292,11 @@ impl Wallet {
             secrets.push_back(MintSecret { secret, r });
         }
 
-        let blind_signatures = self.mint.do_swap(inputs, outputs)?;
+        let blind_signatures = self.mint.do_swap(proofs_to_swap, outputs)?;
 
         let promises = blind_signatures.signatures;
 
+        let mut new_proofs = vec![];
         for promise in promises {
             let amount = &promise.amount;
             let amount_key = active_keys
@@ -280,14 +311,25 @@ impl Wallet {
             let r = &minting_secret.r;
             let amount_pubkey = &PublicKey::from_hex(amount_key)?;
             let secret = &minting_secret.secret;
+
             let proof = promise
                 .construct_proof(r, amount_pubkey, secret)
                 .context("construct proof")?;
-            self.proofs.push(proof);
+
+            new_proofs.push(proof);
         }
 
-        // remove melted (swapped out) proof from wallet
-        self.proofs.remove(proof_index);
+        // remove melted (swapped out) proofs from wallet:
+        // sort the indexes in reverse to be sure to remove proofs from the back of the vector,
+        // otherwise the indexes would change during the removal
+        proof_indexes_to_remove.sort();
+        proof_indexes_to_remove.reverse();
+
+        for index in proof_indexes_to_remove {
+            self.proofs.remove(index);
+        }
+        // add new proofs
+        self.proofs.append(&mut new_proofs);
 
         self.save()?;
 
