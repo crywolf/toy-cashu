@@ -78,7 +78,10 @@ impl Repl {
                 writeln!(std::io::stdout(), "  Minted amounts: {:?}", amounts)?;
                 std::io::stdout().flush()?;
             }
-            Command::SwapTokens { inputs, outputs } => {
+            Command::SwapTokens {
+                inputs,
+                mut outputs,
+            } => {
                 write!(std::io::stdout(), "  Confirm swap: ")?;
                 writeln!(std::io::stdout(), "{:?} -> {:?}", inputs, outputs)?;
                 write!(std::io::stdout(), "  (y/n): ")?;
@@ -92,7 +95,8 @@ impl Repl {
                     return Ok(false);
                 }
 
-                self.wallet.swap_tokens(inputs.clone(), &outputs)?;
+                self.wallet.swap_tokens(&inputs, &mut outputs)?;
+                self.wallet.save()?;
 
                 writeln!(
                     std::io::stdout(),
@@ -146,7 +150,7 @@ enum Command {
         /// Amount in sats
         sats: u64,
     },
-    /// Swap tokens
+    /// Swap tokens (manually)
     #[command(name = "swap")]
     SwapTokens {
         /// Inputs in sats

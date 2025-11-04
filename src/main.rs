@@ -7,6 +7,7 @@ use crate::wallet::Wallet;
 mod cashu;
 mod cli;
 mod file;
+mod helpers;
 mod mint;
 mod repl;
 mod wallet;
