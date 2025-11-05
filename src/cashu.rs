@@ -160,17 +160,21 @@ impl TokenV4 {
 
         for proof in proofs {
             let keyset_id = proof.keyset_id.clone();
+            let token_proof = TokenProof::try_from(proof)?;
+
             keyset_id_proofs
                 .entry(keyset_id)
-                .and_modify(|tp| tp.push(proof.into()))
-                .or_insert(vec![proof.into()]);
+                .and_modify(|tp| tp.push(token_proof))
+                .or_insert(vec![proof.try_into()?]);
         }
 
         let mut tokens = vec![];
 
         for (keyset_id, token_proofs) in keyset_id_proofs {
             let inner_token = InnerToken {
-                keyset_id: hex::decode(keyset_id)?.into(),
+                keyset_id: hex::decode(keyset_id)
+                    .context("decode hex value of keyset id")?
+                    .into(),
                 proofs: token_proofs,
             };
             tokens.push(inner_token);
@@ -230,20 +234,26 @@ struct TokenProof {
     c: ByteBuf,
 }
 
-impl From<Proof> for TokenProof {
-    fn from(value: Proof) -> Self {
-        Self {
+impl TryFrom<Proof> for TokenProof {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Proof) -> std::result::Result<Self, Self::Error> {
+        Ok(Self {
             amount: value.amount,
             secret: value.secret,
-            c: hex::decode(value.c).unwrap().into(), // TODO
-        }
+            c: hex::decode(value.c)
+                .context("decode hex value of signature in proof")?
+                .into(),
+        })
     }
 }
 
-impl From<&Proof> for TokenProof {
-    fn from(value: &Proof) -> Self {
+impl TryFrom<&Proof> for TokenProof {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &Proof) -> std::result::Result<Self, Self::Error> {
         let value = value.clone();
-        value.into()
+        value.try_into()
     }
 }
 
