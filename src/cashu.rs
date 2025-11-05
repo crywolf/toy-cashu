@@ -1,7 +1,12 @@
 use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _, alphabet,
+    engine::{
+        DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig, general_purpose::URL_SAFE_NO_PAD,
+    },
+};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -150,7 +155,7 @@ impl FromStr for TokenV4 {
 }
 
 impl TokenV4 {
-    pub fn new(mint_url: &str, unit: &str, proofs: &[Proof]) -> Self {
+    pub fn new(mint_url: &str, unit: &str, proofs: &[Proof]) -> Result<Self> {
         let mut keyset_id_proofs = IndexMap::<String, Vec<TokenProof>>::new();
 
         for proof in proofs {
@@ -165,17 +170,17 @@ impl TokenV4 {
 
         for (keyset_id, token_proofs) in keyset_id_proofs {
             let inner_token = InnerToken {
-                keyset_id: hex::decode(keyset_id).unwrap().into(), // TODO
+                keyset_id: hex::decode(keyset_id)?.into(),
                 proofs: token_proofs,
             };
             tokens.push(inner_token);
         }
 
-        Self {
+        Ok(Self {
             mint_url: mint_url.to_string(),
             unit: unit.to_string(),
             tokens,
-        }
+        })
     }
 
     fn serialize(&self) -> String {
@@ -183,16 +188,23 @@ impl TokenV4 {
         ciborium::into_writer(self, &mut cbor_token).unwrap();
 
         let url_encoded = URL_SAFE_NO_PAD.encode(cbor_token);
-        let token_string = format!("cashuB{}", url_encoded.trim_end_matches('='));
+        let token_string = format!("cashuB{}", url_encoded);
 
         token_string
     }
 
     fn deserialize(token_string: &str) -> Result<Self> {
+        let indifferent_padding_config =
+            GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent);
+        let indifferent_padding_engine =
+            GeneralPurpose::new(&alphabet::URL_SAFE, indifferent_padding_config);
+
         let token_string = token_string
             .strip_prefix("cashuB")
             .ok_or(anyhow!("Missing cashu version prefix"))?;
-        let url_decoded = URL_SAFE_NO_PAD.decode(token_string).context("url decode")?;
+        let url_decoded = indifferent_padding_engine
+            .decode(token_string)
+            .context("url decode")?;
         let token = ciborium::from_reader(&url_decoded[..]).context("deserialize CBOR")?;
         Ok(token)
     }
@@ -268,7 +280,7 @@ mod tests {
 
         let proofs = vec![proof1, proof2, proof3];
 
-        TokenV4::new(mint_url, unit, &proofs)
+        TokenV4::new(mint_url, unit, &proofs).unwrap()
     }
 
     #[test]
@@ -285,6 +297,16 @@ mod tests {
         let expected = prepare_token();
 
         let deserialized_token = TokenV4::from_str(TOKEN_STRING).unwrap();
+        assert_eq!(deserialized_token, expected);
+    }
+
+    #[test]
+    fn test_token_with_padding_deserialization() {
+        let expected = prepare_token();
+
+        let token_with_padding = &format!("{}{}", TOKEN_STRING, "==");
+
+        let deserialized_token = TokenV4::from_str(token_with_padding).unwrap();
         assert_eq!(deserialized_token, expected);
     }
 }
