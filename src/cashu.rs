@@ -1,5 +1,10 @@
-use anyhow::{Context, Result};
+use std::str::FromStr;
+
+use anyhow::{Context, Result, anyhow};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
 
 use crypto::{PublicKey, Secret, SecretKey, hash_to_curve};
 
@@ -113,9 +118,173 @@ pub struct Proof {
     /// keyset ID of the mint keys that signed the token
     #[serde(rename = "id")]
     pub keyset_id: String,
-    // secret message
+    /// secret message
     secret: String,
     /// unblinded signature on secret
     #[serde(rename = "C")]
     c: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TokenV4 {
+    #[serde(rename = "t")]
+    tokens: Vec<InnerToken>,
+    #[serde(rename = "m")]
+    mint_url: String,
+    #[serde(rename = "u")]
+    unit: String,
+}
+
+impl std::fmt::Display for TokenV4 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.serialize())
+    }
+}
+
+impl FromStr for TokenV4 {
+    type Err = anyhow::Error;
+
+    fn from_str(token_string: &str) -> std::result::Result<Self, Self::Err> {
+        Self::deserialize(token_string)
+    }
+}
+
+impl TokenV4 {
+    pub fn new(mint_url: &str, unit: &str, proofs: &[Proof]) -> Self {
+        let mut keyset_id_proofs = IndexMap::<String, Vec<TokenProof>>::new();
+
+        for proof in proofs {
+            let keyset_id = proof.keyset_id.clone();
+            keyset_id_proofs
+                .entry(keyset_id)
+                .and_modify(|tp| tp.push(proof.into()))
+                .or_insert(vec![proof.into()]);
+        }
+
+        let mut tokens = vec![];
+
+        for (keyset_id, token_proofs) in keyset_id_proofs {
+            let inner_token = InnerToken {
+                keyset_id: hex::decode(keyset_id).unwrap().into(), // TODO
+                proofs: token_proofs,
+            };
+            tokens.push(inner_token);
+        }
+
+        Self {
+            mint_url: mint_url.to_string(),
+            unit: unit.to_string(),
+            tokens,
+        }
+    }
+
+    fn serialize(&self) -> String {
+        let mut cbor_token = vec![];
+        ciborium::into_writer(self, &mut cbor_token).unwrap();
+
+        let url_encoded = URL_SAFE_NO_PAD.encode(cbor_token);
+        let token_string = format!("cashuB{}", url_encoded.trim_end_matches('='));
+
+        token_string
+    }
+
+    fn deserialize(token_string: &str) -> Result<Self> {
+        let token_string = token_string
+            .strip_prefix("cashuB")
+            .ok_or(anyhow!("Missing cashu version prefix"))?;
+        let url_decoded = URL_SAFE_NO_PAD.decode(token_string).context("url decode")?;
+        let token = ciborium::from_reader(&url_decoded[..]).context("deserialize CBOR")?;
+        Ok(token)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct InnerToken {
+    #[serde(rename = "i")]
+    // keyset id represented as bytes
+    pub keyset_id: ByteBuf,
+
+    #[serde(rename = "p")]
+    proofs: Vec<TokenProof>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct TokenProof {
+    #[serde(rename = "a")]
+    pub amount: u64,
+    #[serde(rename = "s")]
+    secret: String,
+    // unblinded signature on secret represented as bytes
+    c: ByteBuf,
+}
+
+impl From<Proof> for TokenProof {
+    fn from(value: Proof) -> Self {
+        Self {
+            amount: value.amount,
+            secret: value.secret,
+            c: hex::decode(value.c).unwrap().into(), // TODO
+        }
+    }
+}
+
+impl From<&Proof> for TokenProof {
+    fn from(value: &Proof) -> Self {
+        let value = value.clone();
+        value.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TOKEN_STRING: &str = "cashuBo2F0gqJhaUgA_9SLj17PgGFwgaNhYQFhc3hAYWNjMTI0MzVlN2I4NDg0YzNjZjE4NTAxNDkyMThhZjkwZjcxNmE1MmJmNGE1ZWQzNDdlNDhlY2MxM2Y3NzM4OGFjWCECRFODGd5IXVW-07KaZCvuWHk3WrnnpiDhHki6SCQh88-iYWlIAK0mjE0fWCZhcIKjYWECYXN4QDEzMjNkM2Q0NzA3YTU4YWQyZTIzYWRhNGU5ZjFmNDlmNWE1YjRhYzdiNzA4ZWIwZDYxZjczOGY0ODMwN2U4ZWVhY1ghAjRWqhENhLSsdHrr2Cw7AFrKUL9Ffr1XN6RBT6w659lNo2FhAWFzeEA1NmJjYmNiYjdjYzY0MDZiM2ZhNWQ1N2QyMTc0ZjRlZmY4YjQ0MDJiMTc2OTI2ZDNhNTdkM2MzZGNiYjU5ZDU3YWNYIQJzEpxXGeWZN5qXSmJjY8MzxWyvwObQGr5G1YCCgHicY2FtdWh0dHA6Ly9sb2NhbGhvc3Q6MzMzOGF1Y3NhdA";
+
+    fn prepare_token() -> TokenV4 {
+        let proof1 = Proof {
+            amount: 1,
+            keyset_id: "00ffd48b8f5ecf80".to_string(),
+            secret: "acc12435e7b8484c3cf1850149218af90f716a52bf4a5ed347e48ecc13f77388".to_string(),
+            c: "0244538319de485d55bed3b29a642bee5879375ab9e7a620e11e48ba482421f3cf".to_string(),
+        };
+
+        let proof2 = Proof {
+            amount: 2,
+            keyset_id: "00ad268c4d1f5826".to_string(),
+            secret: "1323d3d4707a58ad2e23ada4e9f1f49f5a5b4ac7b708eb0d61f738f48307e8ee".to_string(),
+            c: "023456aa110d84b4ac747aebd82c3b005aca50bf457ebd5737a4414fac3ae7d94d".to_string(),
+        };
+
+        let proof3 = Proof {
+            amount: 1,
+            keyset_id: "00ad268c4d1f5826".to_string(),
+            secret: "56bcbcbb7cc6406b3fa5d57d2174f4eff8b4402b176926d3a57d3c3dcbb59d57".to_string(),
+            c: "0273129c5719e599379a974a626363c333c56cafc0e6d01abe46d5808280789c63".to_string(),
+        };
+
+        let mint_url = "http://localhost:3338";
+        let unit = "sat";
+
+        let proofs = vec![proof1, proof2, proof3];
+
+        TokenV4::new(mint_url, unit, &proofs)
+    }
+
+    #[test]
+    fn test_token_serialization() {
+        let token = prepare_token();
+
+        let expected = TOKEN_STRING;
+
+        assert_eq!(token.to_string(), expected);
+    }
+
+    #[test]
+    fn test_token_deserialization() {
+        let expected = prepare_token();
+
+        let deserialized_token = TokenV4::from_str(TOKEN_STRING).unwrap();
+        assert_eq!(deserialized_token, expected);
+    }
 }
