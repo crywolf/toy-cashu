@@ -8,8 +8,8 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::file;
 use crate::mint::{Mint, MintInfo};
+use crate::{cashu::TokenV4, file};
 use crate::{
     cashu::{
         BlindedMessage, BlindedSecret, Proof,
@@ -220,11 +220,7 @@ impl Wallet {
         }
     }
 
-    pub fn swap_tokens(
-        &mut self,
-        input_amounts: &[u64],
-        output_amounts: &mut [u64],
-    ) -> Result<Vec<Proof>> {
+    pub fn swap_tokens(&mut self, input_amounts: &[u64], output_amounts: &mut [u64]) -> Result<()> {
         // In order to preserve privacy around the amount that a client might want to send to another user and keep the rest as change,
         // the client SHOULD ensure that the list requested outputs is ordered by amount in ascending order.
         // https://github.com/cashubtc/nuts/blob/main/03.md#swap-to-send
@@ -343,7 +339,57 @@ impl Wallet {
         // add newly received proofs
         self.proofs.append(&mut new_proofs);
 
-        Ok(new_proofs)
+        Ok(())
+    }
+
+    pub fn prepare_cashu_token(&mut self, amount: u64) -> Result<TokenV4> {
+        let mut available_amounts = self.proofs().map(|p| p.amount).collect::<Vec<_>>();
+
+        let have_total = available_amounts.iter().sum::<u64>();
+        if have_total < amount {
+            bail!("Insufficient funds");
+        }
+
+        let (inputs, mut outputs, amounts_to_send) =
+            Wallet::prepare_amounts_for_swap_before_send(amount, &mut available_amounts);
+
+        if !inputs.is_empty() && !outputs.is_empty() {
+            self.swap_tokens(&inputs, &mut outputs)
+                .context("swap tokens for change")?;
+        }
+
+        let proofs_to_send = self
+            .proofs_with_amounts(&amounts_to_send)
+            .context("find proofs with required amounts")?;
+
+        let token =
+            TokenV4::new(&self.mint.url(), "sat", &proofs_to_send).context("create V4 token")?;
+
+        self.save()?;
+
+        Ok(token)
+    }
+
+    // Get proofs with specified amounts and remove them from the wallet
+    fn proofs_with_amounts(&mut self, amounts: &[u64]) -> Result<Vec<Proof>> {
+        let mut extracted_proofs = Vec::new();
+
+        self.proofs.retain(|p| {
+            if amounts.contains(&p.amount) {
+                extracted_proofs.push(p.clone());
+                false
+            } else {
+                true
+            }
+        });
+
+        if extracted_proofs.len() != amounts.len() {
+            // rollback
+            self.proofs.append(&mut extracted_proofs);
+            bail!("Failed to find proofs with corresponding amounts");
+        }
+
+        Ok(extracted_proofs)
     }
 
     fn create_mint_quote(&self, amount: u64) -> Result<MintQuote> {
@@ -383,7 +429,7 @@ impl Wallet {
         have_amounts.sort();
 
         let have_total = have_amounts.iter().sum::<u64>();
-        assert!(have_total >= total_amount_to_send); // TODO check in caller
+        assert!(have_total >= total_amount_to_send);
 
         // first try to find combinations in 'have_amounts', so we would not need to do swap for a change
         if let Some(amounts_to_send) = helpers::find_subset_sum(have_amounts, total_amount_to_send)

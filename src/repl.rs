@@ -5,6 +5,53 @@ use clap::{Parser, Subcommand};
 
 use crate::wallet::Wallet;
 
+#[derive(Debug, Parser)]
+#[command(multicall = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Display wallet balance
+    Balance,
+    /// Display wallet info
+    #[command(name = "info")]
+    WalletInfo,
+    /// Get info about mint
+    MintInfo,
+    /// Get mint keys
+    #[command(name = "keys")]
+    MintKeys,
+    /// Get mint keysets
+    #[command(name = "keysets")]
+    MintKeysets,
+    /// Mint tokens
+    #[command(name = "mint")]
+    MintTokens {
+        /// Amount in sats
+        sats: u64,
+    },
+    /// Generate Cashu V4 token
+    Send {
+        /// Amount in sats
+        sats: u64,
+    },
+    /// Swap tokens (manually)
+    #[command(name = "swap")]
+    SwapTokens {
+        /// Inputs in sats
+        #[arg(short, long, required = true)]
+        inputs: Vec<u64>,
+        /// Outputs in sats
+        #[arg(short, long, required = true)]
+        outputs: Vec<u64>,
+    },
+    Exit,
+    Quit,
+}
+
 pub fn start(wallet: Wallet) -> Result<()> {
     let mut repl = Repl { wallet };
     loop {
@@ -21,7 +68,11 @@ pub fn start(wallet: Wallet) -> Result<()> {
                 }
             }
             Err(err) => {
-                writeln!(std::io::stdout(), "{err:?}")?;
+                if err.downcast_ref::<clap::Error>().is_some() {
+                    writeln!(std::io::stdout(), "  {err:?}")?;
+                } else {
+                    writeln!(std::io::stdout(), "  error: {err:?}")?;
+                }
                 std::io::stdout().flush()?;
             }
         }
@@ -38,6 +89,7 @@ impl Repl {
     fn respond(&mut self, line: &str) -> Result<bool> {
         let args = line.split_whitespace();
         let cli = Cli::try_parse_from(args)?;
+
         match cli.command {
             Command::Balance => {
                 writeln!(std::io::stdout(), "  Total: {}", self.wallet.balance())?;
@@ -77,6 +129,10 @@ impl Repl {
                 amounts.reverse();
                 writeln!(std::io::stdout(), "  Minted amounts: {:?}", amounts)?;
                 std::io::stdout().flush()?;
+            }
+            Command::Send { sats } => {
+                let token = self.wallet.prepare_cashu_token(sats)?;
+                writeln!(std::io::stdout(), "  Token: {}", token)?;
             }
             Command::SwapTokens {
                 inputs,
@@ -120,46 +176,4 @@ impl Repl {
         std::io::stdin().read_line(&mut buffer)?;
         Ok(buffer)
     }
-}
-
-#[derive(Debug, Parser)]
-#[command(multicall = true)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-    /// Display wallet balance
-    Balance,
-    /// Display wallet info
-    #[command(name = "info")]
-    WalletInfo,
-    /// Get info about mint
-    MintInfo,
-    /// Get mint keys
-    #[command(name = "keys")]
-    MintKeys,
-    /// Get mint keysets
-    #[command(name = "keysets")]
-    MintKeysets,
-    /// Mint tokens
-    #[command(name = "mint")]
-    MintTokens {
-        /// Amount in sats
-        sats: u64,
-    },
-    /// Swap tokens (manually)
-    #[command(name = "swap")]
-    SwapTokens {
-        /// Inputs in sats
-        #[arg(short, long, required = true)]
-        inputs: Vec<u64>,
-        /// Outputs in sats
-        #[arg(short, long, required = true)]
-        outputs: Vec<u64>,
-    },
-    Exit,
-    Quit,
 }
