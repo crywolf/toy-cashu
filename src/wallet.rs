@@ -220,7 +220,11 @@ impl Wallet {
         }
     }
 
-    pub fn swap_tokens(&mut self, input_amounts: &[u64], output_amounts: &mut [u64]) -> Result<()> {
+    pub fn swap_token_amounts(
+        &mut self,
+        input_amounts: &[u64],
+        output_amounts: &mut [u64],
+    ) -> Result<()> {
         // In order to preserve privacy around the amount that a client might want to send to another user and keep the rest as change,
         // the client SHOULD ensure that the list requested outputs is ordered by amount in ascending order.
         // https://github.com/cashubtc/nuts/blob/main/03.md#swap-to-send
@@ -261,7 +265,73 @@ impl Wallet {
             bail!("Could not find enough input proofs with specified amounts")
         }
 
-        let proof_keyset_id = proofs_to_swap
+        let mut new_proofs = self
+            .swap_proofs(&proofs_to_swap, output_amounts)
+            .context("swap proofs")?;
+
+        // remove melted (swapped out) proofs from wallet:
+        // sort the indexes in reverse to be sure to remove proofs from the back of the vector,
+        // otherwise the indexes would change during the removal
+        proof_indexes_to_remove.sort();
+        proof_indexes_to_remove.reverse();
+
+        for index in proof_indexes_to_remove {
+            self.proofs.remove(index);
+        }
+        // add newly received proofs
+        self.proofs.append(&mut new_proofs);
+
+        Ok(())
+    }
+
+    pub fn prepare_cashu_token(&mut self, amount: u64) -> Result<TokenV4> {
+        let mut available_amounts = self.proofs().map(|p| p.amount).collect::<Vec<_>>();
+
+        let have_total = available_amounts.iter().sum::<u64>();
+        if have_total < amount {
+            bail!("Insufficient funds");
+        }
+
+        let (inputs, mut outputs, amounts_to_send) =
+            Self::prepare_amounts_for_swap_before_send(amount, &mut available_amounts);
+
+        if !inputs.is_empty() && !outputs.is_empty() {
+            self.swap_token_amounts(&inputs, &mut outputs)
+                .context("swap tokens for change")?;
+        }
+
+        let proofs_to_send = self
+            .proofs_with_amounts(&amounts_to_send)
+            .context("find proofs with required amounts")?;
+
+        let token =
+            TokenV4::new(&self.mint.url(), "sat", &proofs_to_send).context("create V4 token")?;
+
+        self.save()?;
+
+        Ok(token)
+    }
+
+    pub fn receive_via_cashu_token(&mut self, token: TokenV4) -> Result<u64> {
+        let amount = token.amount();
+
+        // get proofs from token and swap them for new
+        let proofs = token.proofs();
+        let output_amounts = proofs.iter().map(|p| p.amount).collect::<Vec<_>>();
+
+        let mut new_proofs = self
+            .swap_proofs(&proofs, &output_amounts)
+            .context("swap proofs")?;
+
+        self.proofs.append(&mut new_proofs);
+
+        self.save()?;
+
+        Ok(amount)
+    }
+
+    fn swap_proofs(&self, old_proofs: &[Proof], output_amounts: &[u64]) -> Result<Vec<Proof>> {
+        let proof_keyset_id = old_proofs
             .first()
             .ok_or(anyhow!("No proofs to swap"))?
             .keyset_id
@@ -300,7 +370,7 @@ impl Wallet {
             secrets.push_back(MintSecret { secret, r });
         }
 
-        let blind_signatures = self.mint.do_swap(proofs_to_swap, outputs)?;
+        let blind_signatures = self.mint.do_swap(old_proofs, &outputs)?;
 
         let promises = blind_signatures.signatures;
 
@@ -327,55 +397,18 @@ impl Wallet {
             new_proofs.push(proof);
         }
 
-        // remove melted (swapped out) proofs from wallet:
-        // sort the indexes in reverse to be sure to remove proofs from the back of the vector,
-        // otherwise the indexes would change during the removal
-        proof_indexes_to_remove.sort();
-        proof_indexes_to_remove.reverse();
-
-        for index in proof_indexes_to_remove {
-            self.proofs.remove(index);
-        }
-        // add newly received proofs
-        self.proofs.append(&mut new_proofs);
-
-        Ok(())
-    }
-
-    pub fn prepare_cashu_token(&mut self, amount: u64) -> Result<TokenV4> {
-        let mut available_amounts = self.proofs().map(|p| p.amount).collect::<Vec<_>>();
-
-        let have_total = available_amounts.iter().sum::<u64>();
-        if have_total < amount {
-            bail!("Insufficient funds");
-        }
-
-        let (inputs, mut outputs, amounts_to_send) =
-            Wallet::prepare_amounts_for_swap_before_send(amount, &mut available_amounts);
-
-        if !inputs.is_empty() && !outputs.is_empty() {
-            self.swap_tokens(&inputs, &mut outputs)
-                .context("swap tokens for change")?;
-        }
-
-        let proofs_to_send = self
-            .proofs_with_amounts(&amounts_to_send)
-            .context("find proofs with required amounts")?;
-
-        let token =
-            TokenV4::new(&self.mint.url(), "sat", &proofs_to_send).context("create V4 token")?;
-
-        self.save()?;
-
-        Ok(token)
+        Ok(new_proofs)
     }
 
     // Get proofs with specified amounts and remove them from the wallet
     fn proofs_with_amounts(&mut self, amounts: &[u64]) -> Result<Vec<Proof>> {
         let mut extracted_proofs = Vec::new();
+        let mut amounts = amounts.to_vec();
+        let amounts_len = amounts.len();
 
         self.proofs.retain(|p| {
-            if amounts.contains(&p.amount) {
+            if let Some(index) = amounts.iter().position(|amount| amount == &p.amount) {
+                amounts.swap_remove(index);
                 extracted_proofs.push(p.clone());
                 false
             } else {
@@ -383,7 +416,7 @@ impl Wallet {
             }
         });
 
-        if extracted_proofs.len() != amounts.len() {
+        if extracted_proofs.len() != amounts_len {
             // rollback
             self.proofs.append(&mut extracted_proofs);
             bail!("Failed to find proofs with corresponding amounts");
@@ -454,9 +487,9 @@ impl Wallet {
 
         let missing_amount = total_amount_to_send - to_send;
 
-        let mut missing_change = Wallet::split_amount(missing_amount);
+        let mut missing_change = Self::split_amount(missing_amount);
 
-        let mut needed_change_amounts = Wallet::split_amount(last_amount - missing_amount);
+        let mut needed_change_amounts = Self::split_amount(last_amount - missing_amount);
         needed_change_amounts.extend_from_slice(&missing_change);
 
         assert_eq!(last_amount, needed_change_amounts.iter().sum::<u64>());

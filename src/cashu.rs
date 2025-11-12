@@ -212,6 +212,29 @@ impl TokenV4 {
         let token = ciborium::from_reader(&url_decoded[..]).context("deserialize CBOR")?;
         Ok(token)
     }
+
+    pub fn amount(&self) -> u64 {
+        self.tokens.iter().map(|t| t.amount()).sum()
+    }
+
+    pub fn proofs(&self) -> Vec<Proof> {
+        let mut proofs = vec![];
+
+        for inner_token in self.tokens.iter() {
+            let keyset_id = hex::encode(inner_token.keyset_id.clone());
+            for token_proof in inner_token.proofs.iter() {
+                let proof = Proof {
+                    amount: token_proof.amount,
+                    keyset_id: keyset_id.clone(),
+                    secret: token_proof.secret.clone(),
+                    c: hex::encode(token_proof.c.clone()),
+                };
+                proofs.push(proof);
+            }
+        }
+
+        proofs
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -222,6 +245,12 @@ struct InnerToken {
 
     #[serde(rename = "p")]
     proofs: Vec<TokenProof>,
+}
+
+impl InnerToken {
+    pub fn amount(&self) -> u64 {
+        self.proofs.iter().map(|p| p.amount).sum()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -147,16 +147,13 @@ impl Mint {
     }
 
     // NUT-03: Swap tokens
-    pub fn do_swap(
-        &self,
-        inputs: Vec<Proof>,
-        outputs: Vec<BlindedMessage>,
-    ) -> Result<BlindSignatures> {
+    pub fn do_swap(&self, inputs: &[Proof], outputs: &[BlindedMessage]) -> Result<BlindSignatures> {
         #[derive(Serialize)]
-        struct SwapRequest {
-            inputs: Vec<Proof>,
-            outputs: Vec<BlindedMessage>,
+        struct SwapRequest<'a> {
+            inputs: &'a [Proof],
+            outputs: &'a [BlindedMessage],
         }
+
         let req = SwapRequest { inputs, outputs };
 
         let r = self

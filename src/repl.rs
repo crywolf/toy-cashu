@@ -1,9 +1,9 @@
-use std::io::Write;
+use std::{io::Write, str::FromStr};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use crate::wallet::Wallet;
+use crate::{cashu, wallet::Wallet};
 
 #[derive(Debug, Parser)]
 #[command(multicall = true)]
@@ -38,13 +38,18 @@ enum Command {
         /// Amount in sats
         sats: u64,
     },
-    /// Swap tokens (manually)
+    /// Receive via Cashu V4 token
+    Receive {
+        /// Cashu V4 token
+        token: String,
+    },
+    /// Swap token amounts (manually)
     #[command(name = "swap")]
-    SwapTokens {
-        /// Inputs in sats
+    SwapTokenAmounts {
+        /// Input amounts in sats
         #[arg(short, long, required = true)]
         inputs: Vec<u64>,
-        /// Outputs in sats
+        /// Output amounts in sats
         #[arg(short, long, required = true)]
         outputs: Vec<u64>,
     },
@@ -133,8 +138,15 @@ impl Repl {
             Command::Send { sats } => {
                 let token = self.wallet.prepare_cashu_token(sats)?;
                 writeln!(std::io::stdout(), "  Token: {}", token)?;
+                std::io::stdout().flush()?;
             }
-            Command::SwapTokens {
+            Command::Receive { token } => {
+                let token = cashu::TokenV4::from_str(&token).context("parse token")?;
+                let amount = self.wallet.receive_via_cashu_token(token)?;
+                writeln!(std::io::stdout(), "  Received: {} sats", amount)?;
+                std::io::stdout().flush()?;
+            }
+            Command::SwapTokenAmounts {
                 inputs,
                 mut outputs,
             } => {
@@ -151,7 +163,7 @@ impl Repl {
                     return Ok(false);
                 }
 
-                self.wallet.swap_tokens(&inputs, &mut outputs)?;
+                self.wallet.swap_token_amounts(&inputs, &mut outputs)?;
                 self.wallet.save()?;
 
                 writeln!(
