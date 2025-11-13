@@ -106,18 +106,27 @@ impl Repl {
             }
             Command::WalletInfo => {
                 let w = &self.wallet;
-                writeln!(std::io::stdout(), "  name: {}, mint: {}", w.name, w.mint())?;
+                writeln!(std::io::stdout(), "  Name: {}, Mint: {}", w.name, w.mint())?;
                 std::io::stdout().flush()?;
             }
             Command::MintInfo => {
                 let info = self.wallet.mint_info()?;
                 writeln!(
                     std::io::stdout(),
-                    "  name: {}, url: {}, pubkey: {}",
+                    "  Name: {}, Url: {}, Version: {}\n  Pubkey: {}",
                     info.name,
                     info.url,
-                    info.pubkey
+                    info.version,
+                    info.pubkey,
                 )?;
+                let mut nuts = info
+                    .nuts
+                    .iter()
+                    .filter(|(_, nut)| nut.is_active())
+                    .map(|(nut, _)| nut)
+                    .collect::<Vec<_>>();
+                nuts.sort();
+                writeln!(std::io::stdout(), "  Supported NUTs: {:?}", nuts)?;
                 std::io::stdout().flush()?;
             }
             Command::MintKeys => {

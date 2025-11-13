@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Result, bail};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,23 @@ pub struct MintInfo {
     #[serde(skip)]
     pub url: String,
     pub pubkey: String,
+    pub version: String,
+    pub nuts: HashMap<u16, Nut>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Nut {
+    #[serde(default)]
+    supported: serde_json::Value,
+    #[serde(default)]
+    disabled: bool,
+}
+
+impl Nut {
+    /// Is NUT supported by mint and not disabled?
+    pub fn is_active(&self) -> bool {
+        !self.disabled && self.supported != serde_json::Value::Bool(false)
+    }
 }
 
 impl Mint {
