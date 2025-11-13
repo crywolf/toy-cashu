@@ -145,20 +145,23 @@ impl Repl {
                 std::io::stdout().flush()?;
             }
             Command::Send { sats } => {
-                let token = self.wallet.prepare_cashu_token(sats)?;
+                let (token, fee) = self.wallet.prepare_cashu_token(sats)?;
                 writeln!(std::io::stdout(), "  Token: {}", token)?;
+                writeln!(std::io::stdout(), "  Fee: {} sat", fee)?;
                 std::io::stdout().flush()?;
             }
             Command::Receive { token } => {
                 let token = cashu::TokenV4::from_str(&token).context("parse token")?;
-                let amount = self.wallet.receive_via_cashu_token(token)?;
-                writeln!(std::io::stdout(), "  Received: {} sats", amount)?;
+                let (amount, fee) = self.wallet.receive_via_cashu_token(token)?;
+                writeln!(
+                    std::io::stdout(),
+                    "  Received: {} sats (fee: {} sat)",
+                    amount - fee,
+                    fee
+                )?;
                 std::io::stdout().flush()?;
             }
-            Command::SwapTokenAmounts {
-                inputs,
-                mut outputs,
-            } => {
+            Command::SwapTokenAmounts { inputs, outputs } => {
                 write!(std::io::stdout(), "  Confirm swap: ")?;
                 writeln!(std::io::stdout(), "{:?} -> {:?}", inputs, outputs)?;
                 write!(std::io::stdout(), "  (y/n): ")?;
@@ -172,7 +175,7 @@ impl Repl {
                     return Ok(false);
                 }
 
-                self.wallet.swap_token_amounts(&inputs, &mut outputs)?;
+                self.wallet.swap_token_amounts(&inputs, &outputs)?;
                 self.wallet.save()?;
 
                 writeln!(

@@ -54,7 +54,6 @@ impl Keysets {
     }
 }
 
-#[expect(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct KeysetInfo {
     pub id: String,

@@ -223,13 +223,8 @@ impl Wallet {
     pub fn swap_token_amounts(
         &mut self,
         input_amounts: &[u64],
-        output_amounts: &mut [u64],
-    ) -> Result<()> {
-        // In order to preserve privacy around the amount that a client might want to send to another user and keep the rest as change,
-        // the client SHOULD ensure that the list requested outputs is ordered by amount in ascending order.
-        // https://github.com/cashubtc/nuts/blob/main/03.md#swap-to-send
-        output_amounts.sort();
-
+        output_amounts: &[u64],
+    ) -> Result<u64> {
         let mut amounts_counter = HashMap::<u64, usize>::new();
         for &amount in input_amounts.iter() {
             amounts_counter
@@ -265,8 +260,8 @@ impl Wallet {
             bail!("Could not find enough input proofs with specified amounts")
         }
 
-        let mut new_proofs = self
-            .swap_proofs(&proofs_to_swap, output_amounts)
+        let (mut new_proofs, fee) = self
+            .swap_proofs(&proofs_to_swap, Some(output_amounts))
             .context("swap proofs")?;
 
         // remove melted (swapped out) proofs from wallet:
@@ -281,10 +276,10 @@ impl Wallet {
         // add newly received proofs
         self.proofs.append(&mut new_proofs);
 
-        Ok(())
+        Ok(fee)
     }
 
-    pub fn prepare_cashu_token(&mut self, amount: u64) -> Result<TokenV4> {
+    pub fn prepare_cashu_token(&mut self, amount: u64) -> Result<(TokenV4, u64)> {
         let mut available_amounts = self.proofs().map(|p| p.amount).collect::<Vec<_>>();
 
         let have_total = available_amounts.iter().sum::<u64>();
@@ -292,11 +287,25 @@ impl Wallet {
             bail!("Insufficient funds");
         }
 
-        let (inputs, mut outputs, amounts_to_send) =
-            Self::prepare_amounts_for_swap_before_send(amount, &mut available_amounts);
+        let unit = "sat";
+
+        let active_keyset_info = self
+            .mint_keysets(true)?
+            .for_unit(unit)
+            .ok_or(anyhow!("No active keyset for '{}'", unit))?;
+        let input_fee_ppk = active_keyset_info.input_fee_ppk;
+
+        let (inputs, outputs, amounts_to_send) = Self::prepare_amounts_for_swap_before_send(
+            amount,
+            &mut available_amounts,
+            input_fee_ppk,
+        );
+
+        let mut fee = 0;
 
         if !inputs.is_empty() && !outputs.is_empty() {
-            self.swap_token_amounts(&inputs, &mut outputs)
+            fee = self
+                .swap_token_amounts(&inputs, &outputs)
                 .context("swap tokens for change")?;
         }
 
@@ -309,28 +318,30 @@ impl Wallet {
 
         self.save()?;
 
-        Ok(token)
+        Ok((token, fee))
     }
 
-    pub fn receive_via_cashu_token(&mut self, token: TokenV4) -> Result<u64> {
+    pub fn receive_via_cashu_token(&mut self, token: TokenV4) -> Result<(u64, u64)> {
         let amount = token.amount();
 
         // get proofs from token and swap them for new
         let proofs = token.proofs();
-        let output_amounts = proofs.iter().map(|p| p.amount).collect::<Vec<_>>();
 
-        let mut new_proofs = self
-            .swap_proofs(&proofs, &output_amounts)
-            .context("swap proofs")?;
+        let (mut new_proofs, fee) = self.swap_proofs(&proofs, None).context("swap proofs")?;
 
         self.proofs.append(&mut new_proofs);
 
         self.save()?;
 
-        Ok(amount)
+        Ok((amount, fee))
     }
 
-    fn swap_proofs(&self, old_proofs: &[Proof], output_amounts: &[u64]) -> Result<Vec<Proof>> {
+    fn swap_proofs(
+        &self,
+        old_proofs: &[Proof],
+        output_amounts: Option<&[u64]>,
+    ) -> Result<(Vec<Proof>, u64)> {
+        // FIXME each proof can have a different keyset
         let proof_keyset_id = old_proofs
             .first()
             .ok_or(anyhow!("No proofs to swap"))?
@@ -349,6 +360,31 @@ impl Wallet {
             .ok_or(anyhow!("No active keyset for '{}'", proof_unit))?;
         let keyset_id = active_keyset_info.id;
 
+        let mut sum_fee_ppk = 0;
+        // TODO
+        for _proof in old_proofs.iter() {
+            sum_fee_ppk += proof_keyset.input_fee_ppk;
+        }
+
+        let fee = sum_fee_ppk.div_ceil(1000);
+
+        let amount_minus_fee = old_proofs.iter().map(|p| p.amount).sum::<u64>() - fee;
+
+        let output_amounts = if let Some(output_amounts) = output_amounts {
+            // swap amounts for change
+            output_amounts.to_vec()
+        } else {
+            // swap proofs when receiving e-cash
+            let mut output_amounts = Self::split_amount(amount_minus_fee);
+
+            // In order to preserve privacy around the amount that a client might want to send to another user and keep the rest as change,
+            // the client SHOULD ensure that the list requested outputs is ordered by amount in ascending order.
+            // https://github.com/cashubtc/nuts/blob/main/03.md#swap-to-send
+            output_amounts.sort();
+
+            output_amounts
+        };
+
         let active_keyset = self
             .mint_keys()?
             .by_id(&keyset_id)
@@ -364,7 +400,7 @@ impl Wallet {
 
             let (b_, r) = BlindedSecret::from_bytes(secret.as_bytes())?;
 
-            let blinded_message = BlindedMessage::new(*amount, &keyset_id, b_.clone());
+            let blinded_message = BlindedMessage::new(amount, &keyset_id, b_.clone());
             outputs.push(blinded_message);
 
             secrets.push_back(MintSecret { secret, r });
@@ -397,7 +433,7 @@ impl Wallet {
             new_proofs.push(proof);
         }
 
-        Ok(new_proofs)
+        Ok((new_proofs, fee))
     }
 
     // Get proofs with specified amounts and remove them from the wallet
@@ -458,6 +494,7 @@ impl Wallet {
     fn prepare_amounts_for_swap_before_send(
         total_amount_to_send: u64,
         have_amounts: &mut [u64],
+        input_fee_ppk: u64,
     ) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
         have_amounts.sort();
 
@@ -469,6 +506,9 @@ impl Wallet {
         {
             return (vec![], vec![], amounts_to_send);
         }
+
+        let num_inputs = 1;
+        let total_fee = (num_inputs * input_fee_ppk).div_ceil(1000);
 
         let mut to_send = 0;
         let mut amounts_to_send = vec![];
@@ -489,10 +529,14 @@ impl Wallet {
 
         let mut missing_change = Self::split_amount(missing_amount);
 
-        let mut needed_change_amounts = Self::split_amount(last_amount - missing_amount);
+        let mut needed_change_amounts =
+            Self::split_amount(last_amount - missing_amount - total_fee);
         needed_change_amounts.extend_from_slice(&missing_change);
 
-        assert_eq!(last_amount, needed_change_amounts.iter().sum::<u64>());
+        assert_eq!(
+            last_amount,
+            needed_change_amounts.iter().sum::<u64>() + total_fee
+        );
 
         // we need to send 'amounts_to_send' + 'missing_change'
         amounts_to_send.append(&mut missing_change);
@@ -633,26 +677,37 @@ mod tests {
     fn test_prepare_amounts_to_send() {
         let mut have_amounts = vec![128u64, 512, 256, 64, 32, 8, 2];
 
+        let input_fee_ppk = 0;
+
         //--------------------------------
         let total_amount_to_send = 32;
-        let (inputs, outputs, to_send) =
-            Wallet::prepare_amounts_for_swap_before_send(total_amount_to_send, &mut have_amounts);
+        let (inputs, outputs, to_send) = Wallet::prepare_amounts_for_swap_before_send(
+            total_amount_to_send,
+            &mut have_amounts,
+            input_fee_ppk,
+        );
         assert!(inputs.is_empty());
         assert!(outputs.is_empty());
         assert_eq!(to_send, vec![32]);
 
         //--------------------------------
         let total_amount_to_send = 74;
-        let (inputs, outputs, to_send) =
-            Wallet::prepare_amounts_for_swap_before_send(total_amount_to_send, &mut have_amounts);
+        let (inputs, outputs, to_send) = Wallet::prepare_amounts_for_swap_before_send(
+            total_amount_to_send,
+            &mut have_amounts,
+            input_fee_ppk,
+        );
         assert!(inputs.is_empty());
         assert!(outputs.is_empty());
         assert_eq!(to_send, vec![2, 8, 64]);
 
         //--------------------------------
         let total_amount_to_send = 403;
-        let (inputs, mut outputs, mut to_send) =
-            Wallet::prepare_amounts_for_swap_before_send(total_amount_to_send, &mut have_amounts);
+        let (inputs, mut outputs, mut to_send) = Wallet::prepare_amounts_for_swap_before_send(
+            total_amount_to_send,
+            &mut have_amounts,
+            input_fee_ppk,
+        );
 
         assert_eq!(inputs, vec![256]);
 
@@ -666,14 +721,42 @@ mod tests {
 
         //--------------------------------
         let total_amount_to_send = 11;
-        let (inputs, mut outputs, mut to_send) =
-            Wallet::prepare_amounts_for_swap_before_send(total_amount_to_send, &mut have_amounts);
+        let (inputs, mut outputs, mut to_send) = Wallet::prepare_amounts_for_swap_before_send(
+            total_amount_to_send,
+            &mut have_amounts,
+            input_fee_ppk,
+        );
 
         assert_eq!(inputs, vec![32]);
 
         outputs.sort();
         assert_eq!(outputs, vec![1, 1, 2, 4, 8, 16]);
         assert_eq!(outputs.iter().sum::<u64>(), inputs[0]);
+
+        to_send.sort();
+        assert_eq!(to_send, vec![1, 2, 8]);
+        assert_eq!(to_send.iter().sum::<u64>(), total_amount_to_send);
+    }
+
+    #[test]
+    fn test_prepare_amounts_to_send_with_fee() {
+        let mut have_amounts = vec![128u64, 512, 256, 64, 32, 8, 2];
+
+        let input_fee_ppk = 100;
+
+        let total_amount_to_send = 11;
+
+        let (inputs, mut outputs, mut to_send) = Wallet::prepare_amounts_for_swap_before_send(
+            total_amount_to_send,
+            &mut have_amounts,
+            input_fee_ppk,
+        );
+
+        assert_eq!(inputs, vec![32]);
+
+        outputs.sort();
+        assert_eq!(outputs, vec![1, 2, 4, 8, 16]);
+        assert_eq!(outputs.iter().sum::<u64>(), inputs[0] - 1); // minus total fee
 
         to_send.sort();
         assert_eq!(to_send, vec![1, 2, 8]);
