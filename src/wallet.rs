@@ -299,7 +299,7 @@ impl Wallet {
             amount,
             &mut available_amounts,
             input_fee_ppk,
-        );
+        )?;
 
         let mut fee = 0;
 
@@ -498,11 +498,12 @@ impl Wallet {
             .0
     }
 
+    /// Returns (inputs, outputs, amounts_to_send)
     fn prepare_amounts_for_swap_before_send(
         total_amount_to_send: u64,
         have_amounts: &mut [u64],
         input_fee_ppk: u64,
-    ) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
+    ) -> Result<(Vec<u64>, Vec<u64>, Vec<u64>)> {
         have_amounts.sort();
 
         let have_total = have_amounts.iter().sum::<u64>();
@@ -511,7 +512,7 @@ impl Wallet {
         // first try to find combinations in 'have_amounts', so we would not need to do swap for a change
         if let Some(amounts_to_send) = helpers::find_subset_sum(have_amounts, total_amount_to_send)
         {
-            return (vec![], vec![], amounts_to_send);
+            return Ok((vec![], vec![], amounts_to_send));
         }
 
         let num_inputs = 1;
@@ -534,6 +535,14 @@ impl Wallet {
 
         let missing_amount = total_amount_to_send - to_send;
 
+        if (last_amount - missing_amount) < total_fee {
+            bail!(
+                "Insufficient funds, fee {} exceeds the amount for swap {}",
+                total_fee,
+                last_amount - missing_amount
+            )
+        }
+
         let mut missing_change = Self::split_amount(missing_amount);
 
         let mut needed_change_amounts =
@@ -552,7 +561,7 @@ impl Wallet {
 
         let input_amounts = vec![last_amount];
 
-        (input_amounts, needed_change_amounts, amounts_to_send)
+        Ok((input_amounts, needed_change_amounts, amounts_to_send))
     }
 
     fn load(name: &str, password: &str) -> Result<Self> {
@@ -692,7 +701,8 @@ mod tests {
             total_amount_to_send,
             &mut have_amounts,
             input_fee_ppk,
-        );
+        )
+        .unwrap();
         assert!(inputs.is_empty());
         assert!(outputs.is_empty());
         assert_eq!(to_send, vec![32]);
@@ -703,7 +713,8 @@ mod tests {
             total_amount_to_send,
             &mut have_amounts,
             input_fee_ppk,
-        );
+        )
+        .unwrap();
         assert!(inputs.is_empty());
         assert!(outputs.is_empty());
         assert_eq!(to_send, vec![2, 8, 64]);
@@ -714,7 +725,8 @@ mod tests {
             total_amount_to_send,
             &mut have_amounts,
             input_fee_ppk,
-        );
+        )
+        .unwrap();
 
         assert_eq!(inputs, vec![256]);
 
@@ -732,7 +744,8 @@ mod tests {
             total_amount_to_send,
             &mut have_amounts,
             input_fee_ppk,
-        );
+        )
+        .unwrap();
 
         assert_eq!(inputs, vec![32]);
 
@@ -757,7 +770,8 @@ mod tests {
             total_amount_to_send,
             &mut have_amounts,
             input_fee_ppk,
-        );
+        )
+        .unwrap();
 
         assert_eq!(inputs, vec![32]);
 
@@ -767,6 +781,54 @@ mod tests {
 
         to_send.sort();
         assert_eq!(to_send, vec![1, 2, 8]);
+        assert_eq!(to_send.iter().sum::<u64>(), total_amount_to_send);
+    }
+
+    #[test]
+    fn test_prepare_amounts_to_send_with_fee_higher_than_we_have() {
+        let mut have_amounts = vec![2];
+
+        let input_fee_ppk = 2000;
+
+        let total_amount_to_send = 1;
+
+        let res = Wallet::prepare_amounts_for_swap_before_send(
+            total_amount_to_send,
+            &mut have_amounts,
+            input_fee_ppk,
+        );
+
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .starts_with("Insufficient funds")
+        )
+    }
+
+    #[test]
+    fn test_prepare_amounts_to_send_with_fee_exactly_what_we_have() {
+        let mut have_amounts = vec![2];
+
+        let input_fee_ppk = 1000;
+
+        let total_amount_to_send = 1;
+
+        let (inputs, mut outputs, mut to_send) = Wallet::prepare_amounts_for_swap_before_send(
+            total_amount_to_send,
+            &mut have_amounts,
+            input_fee_ppk,
+        )
+        .unwrap();
+
+        assert_eq!(inputs, vec![2]);
+
+        outputs.sort();
+        assert_eq!(outputs, vec![1]);
+        assert_eq!(outputs.iter().sum::<u64>(), inputs[0] - 1); // minus total fee
+
+        to_send.sort();
+        assert_eq!(to_send, vec![1]);
         assert_eq!(to_send.iter().sum::<u64>(), total_amount_to_send);
     }
 }
