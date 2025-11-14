@@ -103,13 +103,13 @@ impl Wallet {
         Ok(w)
     }
 
-    pub fn mint(&self) -> String {
+    pub fn mint_url(&self) -> String {
         self.mint.url()
     }
 
     pub fn mint_info(&mut self) -> Result<MintInfo> {
         let mut info = self.mint.get_info().cloned()?;
-        info.url = self.mint();
+        info.url = self.mint_url();
         Ok(info)
     }
 
@@ -323,6 +323,13 @@ impl Wallet {
 
     pub fn receive_via_cashu_token(&mut self, token: TokenV4) -> Result<(u64, u64)> {
         let amount = token.amount();
+
+        if token.mint_url() != self.mint_url() {
+            bail!(
+                "Receiving from different mint is not supported. Token is from {}",
+                token.mint_url()
+            );
+        }
 
         // get proofs from token and swap them for new
         let proofs = token.proofs();

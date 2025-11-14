@@ -106,7 +106,12 @@ impl Repl {
             }
             Command::WalletInfo => {
                 let w = &self.wallet;
-                writeln!(std::io::stdout(), "  Name: {}, Mint: {}", w.name, w.mint())?;
+                writeln!(
+                    std::io::stdout(),
+                    "  Name: {}, Mint: {}",
+                    w.name,
+                    w.mint_url()
+                )?;
                 std::io::stdout().flush()?;
             }
             Command::MintInfo => {

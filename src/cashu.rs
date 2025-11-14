@@ -217,6 +217,10 @@ impl TokenV4 {
         self.tokens.iter().map(|t| t.amount()).sum()
     }
 
+    pub fn mint_url(&self) -> &str {
+        &self.mint_url
+    }
+
     pub fn proofs(&self) -> Vec<Proof> {
         let mut proofs = vec![];
 
