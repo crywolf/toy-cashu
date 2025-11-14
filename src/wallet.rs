@@ -341,28 +341,22 @@ impl Wallet {
         old_proofs: &[Proof],
         output_amounts: Option<&[u64]>,
     ) -> Result<(Vec<Proof>, u64)> {
-        // FIXME each proof can have a different keyset
-        let proof_keyset_id = old_proofs
-            .first()
-            .ok_or(anyhow!("No proofs to swap"))?
-            .keyset_id
-            .clone();
+        let mut proof_unit = String::new();
 
-        let proof_keyset = self
-            .mint_keysets(false)?
-            .by_id(&proof_keyset_id)
-            .ok_or(anyhow!("Missing keyset {}", proof_keyset_id))?;
-        let proof_unit = &proof_keyset.unit;
-
-        let active_keyset_info = self
-            .mint_keysets(true)?
-            .for_unit(proof_unit)
-            .ok_or(anyhow!("No active keyset for '{}'", proof_unit))?;
-        let keyset_id = active_keyset_info.id;
-
+        // calculate fee
         let mut sum_fee_ppk = 0;
-        // TODO
-        for _proof in old_proofs.iter() {
+        for proof in old_proofs.iter() {
+            let proof_keyset_id = &proof.keyset_id;
+
+            let proof_keyset = self
+                .mint_keysets(false)?
+                .by_id(proof_keyset_id)
+                .ok_or(anyhow!("Missing keyset {}", proof_keyset_id))?;
+
+            if proof_unit.is_empty() {
+                proof_unit = proof_keyset.unit.clone();
+            }
+
             sum_fee_ppk += proof_keyset.input_fee_ppk;
         }
 
@@ -385,9 +379,15 @@ impl Wallet {
             output_amounts
         };
 
+        let active_keyset_info = self
+            .mint_keysets(true)?
+            .for_unit(&proof_unit)
+            .ok_or(anyhow!("No active keyset for '{}'", proof_unit))?;
+        let active_keyset_id = active_keyset_info.id;
+
         let active_keyset = self
             .mint_keys()?
-            .by_id(&keyset_id)
+            .by_id(&active_keyset_id)
             .ok_or(anyhow!("Mint did not provided active keys"))?;
 
         let active_keys = active_keyset.keys;
@@ -400,7 +400,7 @@ impl Wallet {
 
             let (b_, r) = BlindedSecret::from_bytes(secret.as_bytes())?;
 
-            let blinded_message = BlindedMessage::new(amount, &keyset_id, b_.clone());
+            let blinded_message = BlindedMessage::new(amount, &active_keyset_id, b_.clone());
             outputs.push(blinded_message);
 
             secrets.push_back(MintSecret { secret, r });
