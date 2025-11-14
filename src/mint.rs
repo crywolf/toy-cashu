@@ -16,6 +16,10 @@ pub struct Mint {
     url: Url,
     #[serde(skip)]
     info: Option<MintInfo>,
+    #[serde(skip)]
+    keys: Option<Keys>,
+    #[serde(skip)]
+    keysets: Option<Keysets>,
     #[serde(skip, default = "reqwest::blocking::Client::new")]
     http: reqwest::blocking::Client,
 }
@@ -53,6 +57,8 @@ impl Mint {
         Ok(Self {
             url,
             info: None,
+            keys: None,
+            keysets: None,
             http: c,
         })
     }
@@ -73,17 +79,24 @@ impl Mint {
     }
 
     /// NUT-01: Mint public key exchange
-    pub fn get_keys(&self) -> Result<Keys> {
-        let r = self.http.get(self.url.join("/v1/keys")?).send()?;
-        let keys: Keys = r.json()?;
-        Ok(keys)
+    pub fn get_keys(&mut self) -> Result<&Keys> {
+        if self.keys.is_none() {
+            let r = self.http.get(self.url.join("/v1/keys")?).send()?;
+            let keys: Keys = r.json()?;
+            self.keys = Some(keys);
+        }
+
+        Ok(self.keys.as_ref().expect("keys were downloaded"))
     }
 
     /// NUT-02: Keysets and fees
-    pub fn get_keysets(&self) -> Result<Keysets> {
-        let r = self.http.get(self.url.join("/v1/keysets")?).send()?;
-        let keysets: Keysets = r.json()?;
-        Ok(keysets)
+    pub fn get_keysets(&mut self) -> Result<&Keysets> {
+        if self.keysets.is_none() {
+            let r = self.http.get(self.url.join("/v1/keysets")?).send()?;
+            let keysets: Keysets = r.json()?;
+            self.keysets = Some(keysets);
+        }
+        Ok(self.keysets.as_ref().expect("keysets were downloaded"))
     }
 
     /// NUT-23: BOLT11

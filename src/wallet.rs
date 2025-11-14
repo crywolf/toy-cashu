@@ -113,12 +113,12 @@ impl Wallet {
         Ok(info)
     }
 
-    pub fn mint_keys(&self) -> Result<Keys> {
-        self.mint.get_keys()
+    pub fn mint_keys(&mut self) -> Result<Keys> {
+        self.mint.get_keys().cloned()
     }
 
-    pub fn mint_keysets(&self, only_active: bool) -> Result<Keysets> {
-        let mut ks = self.mint.get_keysets().context("get_keysets")?;
+    pub fn mint_keysets(&mut self, only_active: bool) -> Result<Keysets> {
+        let mut ks = self.mint.get_keysets().cloned().context("get_keysets")?;
         if only_active {
             let ks_vec = ks
                 .keysets
@@ -337,7 +337,7 @@ impl Wallet {
     }
 
     fn swap_proofs(
-        &self,
+        &mut self,
         old_proofs: &[Proof],
         output_amounts: Option<&[u64]>,
     ) -> Result<(Vec<Proof>, u64)> {

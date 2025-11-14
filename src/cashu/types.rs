@@ -20,7 +20,7 @@ pub enum QuoteState {
     Issued,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Keys {
     keysets: Vec<Keyset>,
 }
@@ -32,14 +32,14 @@ impl Keys {
 }
 
 #[expect(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Keyset {
     pub id: String,
     pub unit: String,
     pub keys: BTreeMap<u64, String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Keysets {
     pub keysets: Vec<KeysetInfo>,
 }
@@ -54,7 +54,7 @@ impl Keysets {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct KeysetInfo {
     pub id: String,
     pub unit: String,
