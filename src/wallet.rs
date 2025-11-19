@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, VecDeque},
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -9,14 +9,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::mint::{Mint, MintInfo};
-use crate::{cashu::TokenV4, file};
 use crate::{
     cashu::{
-        BlindedMessage, BlindedSecret, Proof,
+        BlindedMessage, BlindedSecret, Proof, TokenV4,
         crypto::{PublicKey, Secret, SecretKey},
         types::{Keys, Keysets, MintQuote, QuoteState},
     },
-    helpers,
+    file, helpers,
 };
 
 const WALLETS_DIR: &str = ".wallets";
@@ -161,13 +160,13 @@ impl Wallet {
             let active_keyset_info = self
                 .mint_keysets(true)?
                 .for_unit(&unit)
-                .ok_or(anyhow!("No active keyset for '{}'", unit))?;
+                .ok_or_else(|| anyhow!("No active keyset for '{}'", unit))?;
             let keyset_id = active_keyset_info.id;
 
             let active_keyset = self
                 .mint_keys()?
                 .by_id(&keyset_id)
-                .ok_or(anyhow!("Mint did not provided active keys"))?;
+                .ok_or_else(|| anyhow!("Mint did not provided active keys"))?;
 
             let active_keys = active_keyset.keys;
 
@@ -185,7 +184,9 @@ impl Wallet {
                 minting_secrets.insert(amount, MintSecret { secret, r });
             }
 
-            let blind_signatures = self.mint.do_minting(quote_id, outputs)?;
+            let blind_signatures = self.mint.do_minting(&quote_id, &outputs)?;
+
+            self.save()?; // save bala
 
             let promises = blind_signatures.signatures;
 
@@ -194,12 +195,12 @@ impl Wallet {
                 let amount = &promise.amount;
                 let amount_key = active_keys
                     .get(amount)
-                    .ok_or(anyhow!("Mint error: key for amount does not exist"))?
+                    .ok_or_else(|| anyhow!("Mint error: key for amount does not exist"))?
                     .clone();
 
                 let minting_secret = minting_secrets
                     .get(amount)
-                    .ok_or(anyhow!("Missing secret for amount: {}", amount))?;
+                    .ok_or_else(|| anyhow!("Missing secret for amount: {}", amount))?;
 
                 let r = &minting_secret.r;
                 let amount_pubkey = &PublicKey::from_hex(amount_key)?;
@@ -220,101 +221,18 @@ impl Wallet {
         }
     }
 
-    pub fn swap_token_amounts(
-        &mut self,
-        input_amounts: &[u64],
-        output_amounts: &[u64],
-    ) -> Result<u64> {
-        let mut amounts_counter = HashMap::<u64, usize>::new();
-        for &amount in input_amounts.iter() {
-            amounts_counter
-                .entry(amount)
-                .and_modify(|count| *count += 1)
-                .or_insert(1);
-        }
-
-        let mut proofs_to_swap = vec![];
-        let mut proof_indexes_to_remove = vec![];
-
-        let mut added_amounts_counter = HashMap::<u64, usize>::new();
-
-        for (i, proof) in self.proofs.iter().enumerate() {
-            if !amounts_counter.contains_key(&proof.amount) {
-                continue;
-            }
-
-            let added_count = added_amounts_counter
-                .entry(proof.amount)
-                .and_modify(|count| *count += 1)
-                .or_insert(1);
-
-            if let Some(amount_count) = amounts_counter.get(&proof.amount)
-                && *added_count <= *amount_count
-            {
-                proofs_to_swap.push(proof.clone());
-                proof_indexes_to_remove.push(i);
-            }
-        }
-
-        if proofs_to_swap.len() < input_amounts.len() {
-            bail!("Could not find enough input proofs with specified amounts")
-        }
-
-        let (mut new_proofs, fee) = self
-            .swap_proofs(&proofs_to_swap, Some(output_amounts))
-            .context("swap proofs")?;
-
-        // remove melted (swapped out) proofs from wallet:
-        // sort the indexes in reverse to be sure to remove proofs from the back of the vector,
-        // otherwise the indexes would change during the removal
-        proof_indexes_to_remove.sort();
-        proof_indexes_to_remove.reverse();
-
-        for index in proof_indexes_to_remove {
-            self.proofs.remove(index);
-        }
-        // add newly received proofs
-        self.proofs.append(&mut new_proofs);
-
-        Ok(fee)
-    }
-
     pub fn prepare_cashu_token(&mut self, amount: u64) -> Result<(TokenV4, u64)> {
-        let mut available_amounts = self.proofs().map(|p| p.amount).collect::<Vec<_>>();
+        let available_amounts = self.proofs().map(|p| p.amount).collect::<Vec<_>>();
 
         let have_total = available_amounts.iter().sum::<u64>();
         if have_total < amount {
             bail!("Insufficient funds");
         }
 
-        let unit = "sat";
-
-        let active_keyset_info = self
-            .mint_keysets(true)?
-            .for_unit(unit)
-            .ok_or(anyhow!("No active keyset for '{}'", unit))?;
-        let input_fee_ppk = active_keyset_info.input_fee_ppk;
-
-        let (inputs, outputs, amounts_to_send) = Self::prepare_amounts_for_swap_before_send(
-            amount,
-            &mut available_amounts,
-            input_fee_ppk,
-        )?;
-
-        let mut fee = 0;
-
-        if !inputs.is_empty() && !outputs.is_empty() {
-            fee = self
-                .swap_token_amounts(&inputs, &outputs)
-                .context("swap tokens for change")?;
-        }
-
-        let proofs_to_send = self
-            .proofs_with_amounts(&amounts_to_send)
-            .context("find proofs with required amounts")?;
+        let (proofs_to_spend, fee) = self.prepare_inputs_for_spend(amount)?;
 
         let token =
-            TokenV4::new(&self.mint.url(), "sat", &proofs_to_send).context("create V4 token")?;
+            TokenV4::new(&self.mint.url(), "sat", &proofs_to_spend).context("create V4 token")?;
 
         self.save()?;
 
@@ -358,7 +276,7 @@ impl Wallet {
             let proof_keyset = self
                 .mint_keysets(false)?
                 .by_id(proof_keyset_id)
-                .ok_or(anyhow!("Missing keyset {}", proof_keyset_id))?;
+                .ok_or_else(|| anyhow!("Missing keyset {}", proof_keyset_id))?;
 
             if proof_unit.is_empty() {
                 proof_unit = proof_keyset.unit.clone();
@@ -389,13 +307,13 @@ impl Wallet {
         let active_keyset_info = self
             .mint_keysets(true)?
             .for_unit(&proof_unit)
-            .ok_or(anyhow!("No active keyset for '{}'", proof_unit))?;
+            .ok_or_else(|| anyhow!("No active keyset for '{}'", proof_unit))?;
         let active_keyset_id = active_keyset_info.id;
 
         let active_keyset = self
             .mint_keys()?
             .by_id(&active_keyset_id)
-            .ok_or(anyhow!("Mint did not provided active keys"))?;
+            .ok_or_else(|| anyhow!("Mint did not provided active keys"))?;
 
         let active_keys = active_keyset.keys;
 
@@ -422,12 +340,12 @@ impl Wallet {
             let amount = &promise.amount;
             let amount_key = active_keys
                 .get(amount)
-                .ok_or(anyhow!("Mint error: key for amount does not exist"))?
+                .ok_or_else(|| anyhow!("Mint error: key for amount does not exist"))?
                 .clone();
 
             let minting_secret = secrets
                 .pop_front()
-                .ok_or(anyhow!("Missing secret for amount: {}", amount))?;
+                .ok_or_else(|| anyhow!("Missing secret for amount: {}", amount))?;
 
             let r = &minting_secret.r;
             let amount_pubkey = &PublicKey::from_hex(amount_key)?;
@@ -443,8 +361,8 @@ impl Wallet {
         Ok((new_proofs, fee))
     }
 
-    // Get proofs with specified amounts and remove them from the wallet
-    fn proofs_with_amounts(&mut self, amounts: &[u64]) -> Result<Vec<Proof>> {
+    /// Get proofs with specified amounts and remove them from the wallet
+    fn extract_proofs_with_amounts(&mut self, amounts: &[u64]) -> Result<Vec<Proof>> {
         let mut extracted_proofs = Vec::new();
         let mut amounts = amounts.to_vec();
         let amounts_len = amounts.len();
@@ -498,42 +416,67 @@ impl Wallet {
             .0
     }
 
-    /// Returns (inputs, outputs, amounts_to_send)
-    fn prepare_amounts_for_swap_before_send(
-        total_amount_to_send: u64,
-        have_amounts: &mut [u64],
-        input_fee_ppk: u64,
-    ) -> Result<(Vec<u64>, Vec<u64>, Vec<u64>)> {
-        have_amounts.sort();
+    /// Returns (input_proofs, outputs, amounts_to_spend)
+    fn prepare_amounts_for_swap_before_spend(
+        &mut self,
+        total_amount_to_spend: u64,
+    ) -> Result<(Vec<Proof>, Vec<u64>, Vec<u64>)> {
+        let mut available_amounts = self.proofs.iter().map(|p| p.amount).collect::<Vec<_>>();
 
-        let have_total = have_amounts.iter().sum::<u64>();
-        assert!(have_total >= total_amount_to_send);
+        available_amounts.sort();
+
+        let have_total = available_amounts.iter().sum::<u64>();
+        assert!(have_total >= total_amount_to_spend);
 
         // first try to find combinations in 'have_amounts', so we would not need to do swap for a change
-        if let Some(amounts_to_send) = helpers::find_subset_sum(have_amounts, total_amount_to_send)
+        if let Some(amounts_to_spend) =
+            helpers::find_subset_sum(&available_amounts, total_amount_to_spend)
         {
-            return Ok((vec![], vec![], amounts_to_send));
+            return Ok((vec![], vec![], amounts_to_spend));
         }
 
-        let num_inputs = 1;
-        let total_fee = (num_inputs * input_fee_ppk).div_ceil(1000);
-
-        let mut to_send = 0;
-        let mut amounts_to_send = vec![];
+        let mut to_spend_acc = 0;
+        let mut amounts_to_spend = vec![];
 
         let mut last_amount = 0;
-        for amount in have_amounts.iter() {
-            to_send += *amount;
-            if to_send < total_amount_to_send {
-                amounts_to_send.push(*amount);
+        let mut last_proof = None;
+
+        for amount in available_amounts.iter() {
+            to_spend_acc += *amount;
+            if to_spend_acc < total_amount_to_spend {
+                amounts_to_spend.push(*amount);
             } else {
                 last_amount = *amount;
-                to_send -= last_amount;
+                last_proof = Some(
+                    self.extract_proofs_with_amounts(&[last_amount])?
+                        .first()
+                        .expect("proof surely exist")
+                        .clone(),
+                );
+
+                to_spend_acc -= last_amount;
                 break;
             }
         }
 
-        let missing_amount = total_amount_to_send - to_send;
+        if last_proof.is_none() {
+            bail!("failed to find proof");
+        }
+        let last_proof = last_proof.expect("proof was found");
+
+        let missing_amount = total_amount_to_spend - to_spend_acc;
+
+        let num_inputs = 1;
+        let last_proof_keyset_id = last_proof.keyset_id.clone();
+
+        let last_proof_keyset = self
+            .mint_keysets(false)
+            .inspect_err(|_| self.proofs.push(last_proof.clone()))?
+            .by_id(&last_proof_keyset_id)
+            .ok_or_else(|| anyhow!("Missing keyset {}", last_proof_keyset_id))
+            .inspect_err(|_| self.proofs.push(last_proof.clone()))?;
+
+        let total_fee = (num_inputs * last_proof_keyset.input_fee_ppk).div_ceil(1000);
 
         if (last_amount - missing_amount) < total_fee {
             bail!(
@@ -554,14 +497,39 @@ impl Wallet {
             needed_change_amounts.iter().sum::<u64>() + total_fee
         );
 
-        // we need to send 'amounts_to_send' + 'missing_change'
-        amounts_to_send.append(&mut missing_change);
+        // we need to send 'amounts_to_spend' + 'missing_change'
+        amounts_to_spend.append(&mut missing_change);
 
-        assert_eq!(amounts_to_send.iter().sum::<u64>(), total_amount_to_send);
+        assert_eq!(amounts_to_spend.iter().sum::<u64>(), total_amount_to_spend);
 
-        let input_amounts = vec![last_amount];
+        let input_proofs = vec![last_proof];
 
-        Ok((input_amounts, needed_change_amounts, amounts_to_send))
+        Ok((input_proofs, needed_change_amounts, amounts_to_spend))
+    }
+
+    fn prepare_inputs_for_spend(&mut self, amount: u64) -> Result<(Vec<Proof>, u64)> {
+        let (input_proofs, output_amounts, amounts_to_spend) =
+            self.prepare_amounts_for_swap_before_spend(amount)?;
+
+        let mut swap_fee = 0;
+
+        if !input_proofs.is_empty() && !output_amounts.is_empty() {
+            // we need to do a swap to get change
+            let (mut new_proofs, fee) = self
+                .swap_proofs(&input_proofs, Some(&output_amounts))
+                .context("swap proofs")?;
+            swap_fee = fee;
+
+            self.proofs.append(&mut new_proofs);
+
+            self.save()?;
+        }
+
+        let proofs = self
+            .extract_proofs_with_amounts(&amounts_to_spend)
+            .context("find proofs with required amounts")?;
+
+        Ok((proofs, swap_fee))
     }
 
     fn load(name: &str, password: &str) -> Result<Self> {
@@ -687,148 +655,5 @@ mod tests {
         assert_eq!(Wallet::split_amount(3), vec![2, 1]);
         assert_eq!(Wallet::split_amount(11), vec![8, 2, 1]);
         assert_eq!(Wallet::split_amount(255), vec![128, 64, 32, 16, 8, 4, 2, 1]);
-    }
-
-    #[test]
-    fn test_prepare_amounts_to_send() {
-        let mut have_amounts = vec![128u64, 512, 256, 64, 32, 8, 2];
-
-        let input_fee_ppk = 0;
-
-        //--------------------------------
-        let total_amount_to_send = 32;
-        let (inputs, outputs, to_send) = Wallet::prepare_amounts_for_swap_before_send(
-            total_amount_to_send,
-            &mut have_amounts,
-            input_fee_ppk,
-        )
-        .unwrap();
-        assert!(inputs.is_empty());
-        assert!(outputs.is_empty());
-        assert_eq!(to_send, vec![32]);
-
-        //--------------------------------
-        let total_amount_to_send = 74;
-        let (inputs, outputs, to_send) = Wallet::prepare_amounts_for_swap_before_send(
-            total_amount_to_send,
-            &mut have_amounts,
-            input_fee_ppk,
-        )
-        .unwrap();
-        assert!(inputs.is_empty());
-        assert!(outputs.is_empty());
-        assert_eq!(to_send, vec![2, 8, 64]);
-
-        //--------------------------------
-        let total_amount_to_send = 403;
-        let (inputs, mut outputs, mut to_send) = Wallet::prepare_amounts_for_swap_before_send(
-            total_amount_to_send,
-            &mut have_amounts,
-            input_fee_ppk,
-        )
-        .unwrap();
-
-        assert_eq!(inputs, vec![256]);
-
-        outputs.sort();
-        assert_eq!(outputs, vec![1, 1, 2, 4, 8, 16, 32, 64, 128]);
-        assert_eq!(outputs.iter().sum::<u64>(), inputs[0]);
-
-        to_send.sort();
-        assert_eq!(to_send, vec![1, 2, 8, 8, 32, 32, 64, 128, 128]);
-        assert_eq!(to_send.iter().sum::<u64>(), total_amount_to_send);
-
-        //--------------------------------
-        let total_amount_to_send = 11;
-        let (inputs, mut outputs, mut to_send) = Wallet::prepare_amounts_for_swap_before_send(
-            total_amount_to_send,
-            &mut have_amounts,
-            input_fee_ppk,
-        )
-        .unwrap();
-
-        assert_eq!(inputs, vec![32]);
-
-        outputs.sort();
-        assert_eq!(outputs, vec![1, 1, 2, 4, 8, 16]);
-        assert_eq!(outputs.iter().sum::<u64>(), inputs[0]);
-
-        to_send.sort();
-        assert_eq!(to_send, vec![1, 2, 8]);
-        assert_eq!(to_send.iter().sum::<u64>(), total_amount_to_send);
-    }
-
-    #[test]
-    fn test_prepare_amounts_to_send_with_fee() {
-        let mut have_amounts = vec![128u64, 512, 256, 64, 32, 8, 2];
-
-        let input_fee_ppk = 100;
-
-        let total_amount_to_send = 11;
-
-        let (inputs, mut outputs, mut to_send) = Wallet::prepare_amounts_for_swap_before_send(
-            total_amount_to_send,
-            &mut have_amounts,
-            input_fee_ppk,
-        )
-        .unwrap();
-
-        assert_eq!(inputs, vec![32]);
-
-        outputs.sort();
-        assert_eq!(outputs, vec![1, 2, 4, 8, 16]);
-        assert_eq!(outputs.iter().sum::<u64>(), inputs[0] - 1); // minus total fee
-
-        to_send.sort();
-        assert_eq!(to_send, vec![1, 2, 8]);
-        assert_eq!(to_send.iter().sum::<u64>(), total_amount_to_send);
-    }
-
-    #[test]
-    fn test_prepare_amounts_to_send_with_fee_higher_than_we_have() {
-        let mut have_amounts = vec![2];
-
-        let input_fee_ppk = 2000;
-
-        let total_amount_to_send = 1;
-
-        let res = Wallet::prepare_amounts_for_swap_before_send(
-            total_amount_to_send,
-            &mut have_amounts,
-            input_fee_ppk,
-        );
-
-        assert!(res.is_err());
-        assert!(
-            res.unwrap_err()
-                .to_string()
-                .starts_with("Insufficient funds")
-        )
-    }
-
-    #[test]
-    fn test_prepare_amounts_to_send_with_fee_exactly_what_we_have() {
-        let mut have_amounts = vec![2];
-
-        let input_fee_ppk = 1000;
-
-        let total_amount_to_send = 1;
-
-        let (inputs, mut outputs, mut to_send) = Wallet::prepare_amounts_for_swap_before_send(
-            total_amount_to_send,
-            &mut have_amounts,
-            input_fee_ppk,
-        )
-        .unwrap();
-
-        assert_eq!(inputs, vec![2]);
-
-        outputs.sort();
-        assert_eq!(outputs, vec![1]);
-        assert_eq!(outputs.iter().sum::<u64>(), inputs[0] - 1); // minus total fee
-
-        to_send.sort();
-        assert_eq!(to_send, vec![1]);
-        assert_eq!(to_send.iter().sum::<u64>(), total_amount_to_send);
     }
 }

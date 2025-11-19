@@ -150,13 +150,13 @@ impl Mint {
     // NUT-04: Mint tokens
     pub fn do_minting(
         &self,
-        quote_id: String,
-        outputs: Vec<BlindedMessage>,
+        quote_id: &str,
+        outputs: &[BlindedMessage],
     ) -> Result<BlindSignatures> {
         #[derive(Serialize)]
-        struct MintRequest {
-            quote: String,
-            outputs: Vec<BlindedMessage>,
+        struct MintRequest<'a> {
+            quote: &'a str,
+            outputs: &'a [BlindedMessage],
         }
 
         let payment_method = "bolt11";

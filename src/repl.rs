@@ -43,16 +43,6 @@ enum Command {
         /// Cashu V4 token
         token: String,
     },
-    /// Swap token amounts (manually)
-    #[command(name = "swap")]
-    SwapTokenAmounts {
-        /// Input amounts in sats
-        #[arg(short, long, required = true)]
-        inputs: Vec<u64>,
-        /// Output amounts in sats
-        #[arg(short, long, required = true)]
-        outputs: Vec<u64>,
-    },
     Exit,
     Quit,
 }
@@ -163,31 +153,6 @@ impl Repl {
                     "  Received: {} sats (fee: {} sat)",
                     amount - fee,
                     fee
-                )?;
-                std::io::stdout().flush()?;
-            }
-            Command::SwapTokenAmounts { inputs, outputs } => {
-                write!(std::io::stdout(), "  Confirm swap: ")?;
-                writeln!(std::io::stdout(), "{:?} -> {:?}", inputs, outputs)?;
-                write!(std::io::stdout(), "  (y/n): ")?;
-                std::io::stdout().flush()?;
-
-                let mut buf = String::new();
-                std::io::stdin().read_line(&mut buf)?;
-                let buf = buf.trim().to_lowercase();
-                if !buf.starts_with("y") {
-                    writeln!(std::io::stdout(), "  Swap cancelled")?;
-                    return Ok(false);
-                }
-
-                self.wallet.swap_token_amounts(&inputs, &outputs)?;
-                self.wallet.save()?;
-
-                writeln!(
-                    std::io::stdout(),
-                    "  Swap {:?} -> {:?} finished successfully",
-                    inputs,
-                    outputs
                 )?;
                 std::io::stdout().flush()?;
             }
