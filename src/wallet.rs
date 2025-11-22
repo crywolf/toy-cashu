@@ -8,7 +8,10 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::mint::{Mint, MintInfo};
+use crate::{
+    cashu::types::MeltQuote,
+    mint::{Mint, MintInfo},
+};
 use crate::{
     cashu::{
         BlindedMessage, BlindedSecret, Proof, TokenV4,
@@ -186,7 +189,7 @@ impl Wallet {
 
             let blind_signatures = self.mint.do_minting(&quote_id, &outputs)?;
 
-            self.save()?; // save bala
+            self.save()?; // save balance
 
             let promises = blind_signatures.signatures;
 
@@ -221,6 +224,214 @@ impl Wallet {
         }
     }
 
+    pub fn melt_tokens(&mut self, invoice: &str) -> Result<MeltQuote> {
+        let available_amounts = self.proofs().map(|p| p.amount).collect::<Vec<_>>();
+        let have_total = available_amounts.iter().sum::<u64>();
+
+        let quote = self.create_melt_quote(invoice)?;
+
+        let quote_id = quote.quote.clone();
+        let fee_reserve = quote.fee_reserve;
+
+        let total_amount = quote.amount + fee_reserve;
+        if have_total < total_amount {
+            bail!(
+                "Insufficient funds, requested: {} including fee reserve; available: {}",
+                total_amount,
+                have_total
+            );
+        }
+
+        let mut proofs = self.extract_proofs_for_melting(total_amount)?;
+
+        let melt_res = self
+            .mint
+            .do_melting(&quote_id, &proofs)
+            .with_context(|| format!("do melting with quote: {}", quote_id));
+
+        let res_quote = match melt_res {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                self.proofs.append(&mut proofs);
+                self.save()?;
+                Err(e)
+            }
+        }?;
+
+        self.save()?; // save after successful payment
+
+        if res_quote.state != QuoteState::Paid {
+            eprintln!("WARN: LN payment failed: {:?}", res_quote.state)
+        }
+
+        Ok(res_quote)
+    }
+
+    /// Used for melting.
+    fn extract_proofs_for_melting(&mut self, amount_to_melt: u64) -> Result<Vec<Proof>> {
+        let mut available_amounts = self.proofs.iter().map(|p| p.amount).collect::<Vec<_>>();
+        available_amounts.sort();
+
+        let have_total = available_amounts.iter().sum::<u64>();
+        assert!(have_total >= amount_to_melt);
+
+        let unit = "sat";
+
+        // first try to find combinations in 'have_amounts', so we would not need to do swap for a change
+        let (amounts_to_melt, missing_amount) =
+            match helpers::find_subset_sum(&available_amounts, amount_to_melt) {
+                Some(amounts) => (amounts, 0),
+                None => {
+                    let mut to_spend_acc = 0;
+                    let mut amounts_to_melt = vec![];
+
+                    for amount in available_amounts.iter() {
+                        to_spend_acc += *amount;
+                        if to_spend_acc < amount_to_melt {
+                            amounts_to_melt.push(*amount);
+                        } else {
+                            to_spend_acc -= *amount;
+                            break;
+                        }
+                    }
+
+                    let missing_amount = amount_to_melt - to_spend_acc;
+
+                    (amounts_to_melt, missing_amount)
+                }
+            };
+
+        let mut proofs_to_melt = self.extract_proofs_with_amounts(&amounts_to_melt)?;
+
+        // calculate fee and add additional proofs
+        let mut sum_fee_ppk = 0;
+        for proof in proofs_to_melt.iter() {
+            let proof_keyset_id = &proof.keyset_id;
+
+            let proof_keyset = self
+                .mint_keysets(false)?
+                .by_id(proof_keyset_id)
+                .ok_or(anyhow!("Missing keyset {}", proof_keyset_id))?;
+
+            sum_fee_ppk += proof_keyset.input_fee_ppk;
+
+            let index = available_amounts
+                .iter()
+                .position(|a| a == &proof.amount)
+                .expect("amount is present");
+            available_amounts.remove(index);
+        }
+
+        let inputs_fee = sum_fee_ppk.div_ceil(1000);
+
+        let additional_amount_to_spend = inputs_fee + missing_amount;
+
+        if have_total < amount_to_melt + inputs_fee {
+            self.proofs.append(&mut proofs_to_melt);
+            self.save()?;
+            bail!(
+                "Insufficient funds, requested: {} including fees; available: {}",
+                amount_to_melt + inputs_fee,
+                have_total
+            );
+        }
+
+        let (mut proofs_to_swap, mut output_amounts, mut additional_amounts_to_melt) = self
+            .prepare_amounts_for_swap_before_spend(additional_amount_to_spend)
+            .inspect_err(|_| self.proofs.append(&mut proofs_to_melt))?;
+
+        if !proofs_to_swap.is_empty() && !output_amounts.is_empty() {
+            println!("--> Need change");
+            let amounts_count = additional_amounts_to_melt.len() as u64;
+
+            let active_keyset_info = self
+                .mint_keysets(true)?
+                .for_unit(unit)
+                .ok_or_else(|| anyhow!("No active keyset for '{}'", unit))
+                .inspect_err(|_| self.proofs.append(&mut proofs_to_swap))?;
+            let active_fee_ppk = active_keyset_info.input_fee_ppk;
+
+            // estimate total fee including additional_amounts_to_melt inputs
+            let fee_estimate = (sum_fee_ppk + amounts_count * active_fee_ppk).div_ceil(1000);
+
+            if inputs_fee < fee_estimate {
+                // not enough to cover input fee, try it again with amount adjusted
+                let new_additional_amount_to_spend =
+                    additional_amount_to_spend + (fee_estimate - inputs_fee);
+
+                println!(
+                    "--> Need to add more input fee: {} => {} sats",
+                    inputs_fee, fee_estimate,
+                );
+                self.proofs.append(&mut proofs_to_swap);
+
+                if have_total < amount_to_melt + fee_estimate {
+                    self.save()?;
+                    bail!(
+                        "Insufficient funds, requested: {} including fees; available: {}",
+                        amount_to_melt + fee_estimate,
+                        have_total
+                    );
+                }
+
+                let (new_proofs_to_swap, new_output_amounts, new_additional_amounts_to_melt) = self
+                    .prepare_amounts_for_swap_before_spend(new_additional_amount_to_spend)
+                    .inspect_err(|_| self.proofs.append(&mut proofs_to_melt))?;
+
+                proofs_to_swap = new_proofs_to_swap;
+                output_amounts = new_output_amounts;
+                additional_amounts_to_melt = new_additional_amounts_to_melt;
+            }
+
+            if !proofs_to_swap.is_empty() && !output_amounts.is_empty() {
+                // we need to do a swap to get a change
+                println!("--> Doing swap to get some change");
+                let (mut new_proofs, _fee) = self
+                    .swap_proofs(&proofs_to_swap, Some(&output_amounts))
+                    .context("swap proofs")
+                    .inspect_err(|_| self.proofs.append(&mut proofs_to_melt))?;
+
+                self.proofs.append(&mut new_proofs);
+
+                self.save()?; // save newly received proofs
+            }
+        }
+
+        // potential missing proofs and proofs paying fee
+        let mut additional_proofs_to_melt = self
+            .extract_proofs_with_amounts(&additional_amounts_to_melt)
+            .inspect_err(|_| self.proofs.append(&mut proofs_to_melt))?;
+
+        for proof in additional_proofs_to_melt.iter() {
+            let proof_keyset_id = &proof.keyset_id;
+
+            let proof_keyset = self
+                .mint_keysets(false)?
+                .by_id(proof_keyset_id)
+                .ok_or(anyhow!("Missing keyset {}", proof_keyset_id))?;
+
+            sum_fee_ppk += proof_keyset.input_fee_ppk;
+        }
+
+        proofs_to_melt.append(&mut additional_proofs_to_melt);
+
+        let total_inputs_fee = sum_fee_ppk.div_ceil(1000);
+
+        // total fee is higher than already included fee (inputs_fee)
+        if total_inputs_fee < sum_fee_ppk.div_ceil(1000) {
+            // rollback
+            self.proofs.append(&mut proofs_to_melt);
+            self.save()?;
+            bail!(
+                "Total fee {} is higher than the fee included in proofs {}",
+                sum_fee_ppk.div_ceil(1000),
+                total_inputs_fee
+            );
+        }
+
+        Ok(proofs_to_melt)
+    }
+
     pub fn prepare_cashu_token(&mut self, amount: u64) -> Result<(TokenV4, u64)> {
         let available_amounts = self.proofs().map(|p| p.amount).collect::<Vec<_>>();
 
@@ -231,10 +442,10 @@ impl Wallet {
 
         let (proofs_to_spend, fee) = self.prepare_inputs_for_spend(amount)?;
 
+        self.save()?;
+
         let token =
             TokenV4::new(&self.mint.url(), "sat", &proofs_to_spend).context("create V4 token")?;
-
-        self.save()?;
 
         Ok((token, fee))
     }
@@ -386,22 +597,6 @@ impl Wallet {
         Ok(extracted_proofs)
     }
 
-    fn create_mint_quote(&self, amount: u64) -> Result<MintQuote> {
-        let quote = self
-            .mint
-            .create_mint_quote(amount)
-            .context("create_mint_quote")?;
-        Ok(quote)
-    }
-
-    fn check_mint_quote(&self, quote_id: &str) -> Result<MintQuote> {
-        let quote = self
-            .mint
-            .get_mint_quote(quote_id)
-            .context("get_mint_quote")?;
-        Ok(quote)
-    }
-
     fn split_amount(amount: u64) -> Vec<u64> {
         let amounts = (0..32).map(|x| 2u64.pow(x)).collect::<Vec<_>>();
         amounts
@@ -416,7 +611,7 @@ impl Wallet {
             .0
     }
 
-    /// Returns (input_proofs, outputs, amounts_to_spend)
+    /// Returns (input_proofs, outputs, amounts_to_spend). Used for Cashu token creation.
     fn prepare_amounts_for_swap_before_spend(
         &mut self,
         total_amount_to_spend: u64,
@@ -507,6 +702,7 @@ impl Wallet {
         Ok((input_proofs, needed_change_amounts, amounts_to_spend))
     }
 
+    /// Extracts and returns proofs to be spend and potential swap fee. Used for Cashu token creation.
     fn prepare_inputs_for_spend(&mut self, amount: u64) -> Result<(Vec<Proof>, u64)> {
         let (input_proofs, output_amounts, amounts_to_spend) =
             self.prepare_amounts_for_swap_before_spend(amount)?;
@@ -514,7 +710,7 @@ impl Wallet {
         let mut swap_fee = 0;
 
         if !input_proofs.is_empty() && !output_amounts.is_empty() {
-            // we need to do a swap to get change
+            // we need to do a swap to get a change
             let (mut new_proofs, fee) = self
                 .swap_proofs(&input_proofs, Some(&output_amounts))
                 .context("swap proofs")?;
@@ -530,6 +726,30 @@ impl Wallet {
             .context("find proofs with required amounts")?;
 
         Ok((proofs, swap_fee))
+    }
+
+    fn create_mint_quote(&self, amount: u64) -> Result<MintQuote> {
+        let quote = self
+            .mint
+            .create_mint_quote(amount)
+            .context("create_mint_quote")?;
+        Ok(quote)
+    }
+
+    fn check_mint_quote(&self, quote_id: &str) -> Result<MintQuote> {
+        let quote = self
+            .mint
+            .get_mint_quote(quote_id)
+            .context("get_mint_quote")?;
+        Ok(quote)
+    }
+
+    fn create_melt_quote(&self, invoice: &str) -> Result<MeltQuote> {
+        let quote = self
+            .mint
+            .create_melt_quote(invoice)
+            .context("create_melt_quote")?;
+        Ok(quote)
     }
 
     fn load(name: &str, password: &str) -> Result<Self> {

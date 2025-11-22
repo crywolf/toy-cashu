@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cashu::{
     BlindSignatures, BlindedMessage, Proof,
-    types::{Keys, Keysets, MintQuote},
+    types::{Keys, Keysets, MeltQuote, MintQuote},
 };
 
 /// Mint object represents remote mint. Used by [`super::Wallet`] to communicate with mint server specified by its `url`.
@@ -191,6 +191,62 @@ impl Mint {
         let r = self
             .http
             .post(self.url.join("/v1/swap")?)
+            .json(&req)
+            .send()?;
+
+        if r.status().is_success() {
+            Ok(r.json()?)
+        } else {
+            bail!("Response: {} \n  {}", r.status(), r.text()?);
+        }
+    }
+
+    /// NUT-23: BOLT11
+    pub fn create_melt_quote(&self, invoice: &str) -> Result<MeltQuote> {
+        #[derive(Serialize)]
+        struct QuoteRequest<'a> {
+            request: &'a str,
+            unit: &'a str,
+        }
+
+        let payment_method = "bolt11";
+        let req = QuoteRequest {
+            request: invoice,
+            unit: "sat",
+        };
+
+        let r = self
+            .http
+            .post(self.url.join(&format!("/v1/melt/quote/{payment_method}"))?)
+            .json(&req)
+            .send()?;
+
+        if r.status().is_success() {
+            Ok(r.json()?)
+        } else {
+            bail!("Response: {} \n  {}", r.status(), r.text()?);
+        }
+    }
+
+    // NUT-05: Melt tokens
+    pub fn do_melting(&self, quote_id: &str, proofs: &[Proof]) -> Result<MeltQuote> {
+        #[derive(Serialize)]
+        struct MeltRequest<'a> {
+            quote: &'a str,
+            inputs: &'a [Proof],
+            outputs: &'a [BlindedMessage],
+        }
+
+        let payment_method = "bolt11";
+        let req = MeltRequest {
+            quote: quote_id,
+            inputs: proofs,
+            outputs: &[], // TODO https://github.com/cashubtc/nuts/blob/main/08.md
+        };
+
+        let r = self
+            .http
+            .post(self.url.join(&format!("/v1/melt/{payment_method}"))?)
             .json(&req)
             .send()?;
 

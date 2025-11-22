@@ -12,6 +12,17 @@ pub struct MintQuote {
     pub pubkey: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MeltQuote {
+    pub quote: String,
+    pub request: String,
+    pub amount: u64,
+    pub unit: String,
+    pub state: QuoteState,
+    pub fee_reserve: u64,
+    pub payment_preimage: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum QuoteState {

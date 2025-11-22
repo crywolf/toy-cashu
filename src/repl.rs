@@ -33,6 +33,12 @@ enum Command {
         /// Amount in sats
         sats: u64,
     },
+    #[command(name = "melt")]
+    /// Melt tokens
+    MeltTokens {
+        /// LN Invoice
+        invoice: String,
+    },
     /// Generate Cashu V4 token
     Send {
         /// Amount in sats
@@ -138,6 +144,16 @@ impl Repl {
                 amounts.reverse();
                 writeln!(std::io::stdout(), "  Minted amounts: {:?}", amounts)?;
                 std::io::stdout().flush()?;
+            }
+            Command::MeltTokens { invoice } => {
+                let res = self.wallet.melt_tokens(&invoice)?;
+                writeln!(
+                    std::io::stdout(),
+                    "  Melted: {} sats; LN invoice: {:?}; quote ID: {}",
+                    res.amount,
+                    res.state,
+                    res.quote,
+                )?;
             }
             Command::Send { sats } => {
                 let (token, fee) = self.wallet.prepare_cashu_token(sats)?;
