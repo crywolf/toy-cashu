@@ -244,9 +244,39 @@ impl Wallet {
 
         let mut proofs = self.extract_proofs_for_melting(total_amount)?;
 
+        let mut blank_outputs = vec![];
+        let mut melting_secrets = vec![];
+
+        let unit = "sat";
+        let active_keyset_info = self
+            .mint_keysets(true)?
+            .for_unit(unit)
+            .ok_or_else(|| anyhow!("No active keyset for '{}'", unit))
+            .inspect_err(|_| self.proofs.append(&mut proofs))?;
+        let keyset_id = active_keyset_info.id;
+
+        let active_keyset = self
+            .mint_keys()?
+            .by_id(&keyset_id)
+            .ok_or_else(|| anyhow!("Mint did not provided active keys"))
+            .inspect_err(|_| self.proofs.append(&mut proofs))?;
+        let active_keys = active_keyset.keys;
+
+        let blank_outputs_num = Self::calculate_number_of_blank_outputs(fee_reserve);
+
+        for _ in 0..blank_outputs_num {
+            let secret = Secret::generate();
+            let (b_, r) = BlindedSecret::from_bytes(secret.as_bytes())?;
+            let blinded_message = BlindedMessage::new(1, &keyset_id, b_.clone());
+
+            blank_outputs.push(blinded_message);
+
+            melting_secrets.push(MintSecret { secret, r });
+        }
+
         let melt_res = self
             .mint
-            .do_melting(&quote_id, &proofs)
+            .do_melting(&quote_id, &proofs, &blank_outputs)
             .with_context(|| format!("do melting with quote: {}", quote_id));
 
         let res_quote = match melt_res {
@@ -259,6 +289,32 @@ impl Wallet {
         }?;
 
         self.save()?; // save after successful payment
+
+        // deal with returned change from overpaid fee
+        if let Some(promises) = &res_quote.change {
+            for (i, promise) in promises.iter().enumerate() {
+                let amount = &promise.amount;
+                let amount_key = active_keys
+                    .get(amount)
+                    .ok_or_else(|| anyhow!("Mint error: key for amount does not exist"))?
+                    .clone();
+
+                let minting_secret = melting_secrets.get(i).ok_or_else(|| {
+                    anyhow!("Missing secret for change amount: {} (index {})", amount, i)
+                })?;
+
+                let r = &minting_secret.r;
+                let amount_pubkey = &PublicKey::from_hex(amount_key)?;
+                let secret = &minting_secret.secret;
+                let proof = promise
+                    .construct_proof(r, amount_pubkey, secret)
+                    .context("construct proof")?;
+                self.proofs.push(proof);
+            }
+            if !promises.is_empty() {
+                self.save()?; // save stored change
+            }
+        }
 
         if res_quote.state != QuoteState::Paid {
             eprintln!("WARN: LN payment failed: {:?}", res_quote.state)
@@ -728,6 +784,13 @@ impl Wallet {
         Ok((proofs, swap_fee))
     }
 
+    fn calculate_number_of_blank_outputs(fee_reserve: u64) -> u32 {
+        if fee_reserve == 0 {
+            return 0;
+        }
+        1.max((fee_reserve).ilog2() + 1)
+    }
+
     fn create_mint_quote(&self, amount: u64) -> Result<MintQuote> {
         let quote = self
             .mint
@@ -875,5 +938,18 @@ mod tests {
         assert_eq!(Wallet::split_amount(3), vec![2, 1]);
         assert_eq!(Wallet::split_amount(11), vec![8, 2, 1]);
         assert_eq!(Wallet::split_amount(255), vec![128, 64, 32, 16, 8, 4, 2, 1]);
+    }
+
+    #[test]
+    fn test_calculate_number_of_blank_outputs() {
+        assert_eq!(Wallet::calculate_number_of_blank_outputs(0), 0);
+        assert_eq!(Wallet::calculate_number_of_blank_outputs(1), 1);
+        assert_eq!(Wallet::calculate_number_of_blank_outputs(2), 2);
+        assert_eq!(Wallet::calculate_number_of_blank_outputs(3), 2);
+        assert_eq!(Wallet::calculate_number_of_blank_outputs(4), 3);
+        assert_eq!(Wallet::calculate_number_of_blank_outputs(7), 3);
+        assert_eq!(Wallet::calculate_number_of_blank_outputs(8), 4);
+        assert_eq!(Wallet::calculate_number_of_blank_outputs(900), 10);
+        assert_eq!(Wallet::calculate_number_of_blank_outputs(1000), 10);
     }
 }

@@ -229,7 +229,12 @@ impl Mint {
     }
 
     // NUT-05: Melt tokens
-    pub fn do_melting(&self, quote_id: &str, proofs: &[Proof]) -> Result<MeltQuote> {
+    pub fn do_melting(
+        &self,
+        quote_id: &str,
+        proofs: &[Proof],
+        blank_outputs: &[BlindedMessage],
+    ) -> Result<MeltQuote> {
         #[derive(Serialize)]
         struct MeltRequest<'a> {
             quote: &'a str,
@@ -241,7 +246,7 @@ impl Mint {
         let req = MeltRequest {
             quote: quote_id,
             inputs: proofs,
-            outputs: &[], // TODO https://github.com/cashubtc/nuts/blob/main/08.md
+            outputs: blank_outputs, // TODO https://github.com/cashubtc/nuts/blob/main/08.md
         };
 
         let r = self

@@ -147,11 +147,19 @@ impl Repl {
             }
             Command::MeltTokens { invoice } => {
                 let res = self.wallet.melt_tokens(&invoice)?;
+                let returned_change: u64 = res
+                    .change
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|s| s.amount)
+                    .sum();
+
                 writeln!(
                     std::io::stdout(),
-                    "  Melted: {} sats; LN invoice: {:?}; quote ID: {}",
+                    "  Melted: {} sats; LN invoice: {:?}; LN fee: {} quote ID: {}",
                     res.amount,
                     res.state,
+                    res.fee_reserve - returned_change,
                     res.quote,
                 )?;
             }

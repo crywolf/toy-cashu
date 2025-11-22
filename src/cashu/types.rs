@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::cashu::BlindSignature;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MintQuote {
     pub quote: String,
@@ -21,6 +23,8 @@ pub struct MeltQuote {
     pub state: QuoteState,
     pub fee_reserve: u64,
     pub payment_preimage: Option<String>,
+    #[serde(skip_serializing)]
+    pub change: Option<Vec<BlindSignature>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
