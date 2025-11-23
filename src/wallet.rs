@@ -8,15 +8,12 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    cashu::types::MeltQuote,
-    mint::{Mint, MintInfo},
-};
+use crate::mint::{Mint, MintInfo};
 use crate::{
     cashu::{
         BlindedMessage, BlindedSecret, Proof, TokenV4,
         crypto::{PublicKey, Secret, SecretKey},
-        types::{Keys, Keysets, MintQuote, QuoteState},
+        types::{Keys, Keysets, MeltQuote, MintQuote, QuoteState},
     },
     file, helpers,
 };
@@ -141,7 +138,9 @@ impl Wallet {
     }
 
     pub fn mint_tokens(&mut self, amount: u64) -> Result<Vec<u64>> {
-        let quote = self.create_mint_quote(amount)?;
+        let quote = self
+            .create_mint_quote(amount)
+            .context("create_mint_quote")?;
 
         let quote_id = quote.quote.clone();
         let unit = quote.unit.clone();
@@ -228,7 +227,9 @@ impl Wallet {
         let available_amounts = self.proofs().map(|p| p.amount).collect::<Vec<_>>();
         let have_total = available_amounts.iter().sum::<u64>();
 
-        let quote = self.create_melt_quote(invoice)?;
+        let quote = self
+            .create_melt_quote(invoice)
+            .context("create_melt_quote")?;
 
         let quote_id = quote.quote.clone();
         let fee_reserve = quote.fee_reserve;
@@ -242,44 +243,32 @@ impl Wallet {
             );
         }
 
-        let mut proofs = self.extract_proofs_for_melting(total_amount)?;
-
-        let mut blank_outputs = vec![];
-        let mut melting_secrets = vec![];
-
         let unit = "sat";
         let active_keyset_info = self
             .mint_keysets(true)?
             .for_unit(unit)
-            .ok_or_else(|| anyhow!("No active keyset for '{}'", unit))
-            .inspect_err(|_| self.proofs.append(&mut proofs))?;
+            .ok_or_else(|| anyhow!("No active keyset for '{}'", unit))?;
         let keyset_id = active_keyset_info.id;
 
         let active_keyset = self
             .mint_keys()?
             .by_id(&keyset_id)
-            .ok_or_else(|| anyhow!("Mint did not provided active keys"))
-            .inspect_err(|_| self.proofs.append(&mut proofs))?;
+            .ok_or_else(|| anyhow!("Mint did not provided active keys"))?;
         let active_keys = active_keyset.keys;
 
-        let blank_outputs_num = Self::calculate_number_of_blank_outputs(fee_reserve);
+        let mut proofs = self.extract_proofs_for_melting(total_amount)?;
 
-        for _ in 0..blank_outputs_num {
-            let secret = Secret::generate();
-            let (b_, r) = BlindedSecret::from_bytes(secret.as_bytes())?;
-            let blinded_message = BlindedMessage::new(1, &keyset_id, b_.clone());
+        // prepare_blank_outputs to receive LN fee return after melting
+        let (blank_outputs, melting_secrets) = self
+            .prepare_blank_outputs(fee_reserve, &keyset_id)
+            .inspect_err(|_| self.proofs.append(&mut proofs))?;
 
-            blank_outputs.push(blinded_message);
-
-            melting_secrets.push(MintSecret { secret, r });
-        }
-
-        let melt_res = self
+        let melt_result = self
             .mint
             .do_melting(&quote_id, &proofs, &blank_outputs)
             .with_context(|| format!("do melting with quote: {}", quote_id));
 
-        let res_quote = match melt_res {
+        let melt_quote = match melt_result {
             Ok(v) => Ok(v),
             Err(e) => {
                 self.proofs.append(&mut proofs);
@@ -288,10 +277,52 @@ impl Wallet {
             }
         }?;
 
+        println!("--> Saving wallet balance after successful melting...");
         self.save()?; // save after successful payment
 
-        // deal with returned change from overpaid fee
-        if let Some(promises) = &res_quote.change {
+        if melt_quote.state != QuoteState::Paid {
+            eprintln!("WARN: LN payment failed: {:?}", melt_quote.state)
+        }
+
+        // deal with returned change from overpaid LN fee reserve
+        self.process_returned_change(&melt_quote, &melting_secrets, &active_keys)
+            .context("process_returned_change")?;
+
+        Ok(melt_quote)
+    }
+
+    /// Returns blank outputs for receiving LN fee return after melting
+    fn prepare_blank_outputs(
+        &self,
+        fee_reserve: u64,
+        keyset_id: &str,
+    ) -> Result<(Vec<BlindedMessage>, Vec<MintSecret>)> {
+        let mut blank_outputs = vec![];
+        let mut melting_secrets = vec![];
+
+        let blank_outputs_num = Self::calculate_number_of_blank_outputs(fee_reserve);
+
+        for _ in 0..blank_outputs_num {
+            let secret = Secret::generate();
+            let (b_, r) = BlindedSecret::from_bytes(secret.as_bytes())?;
+            let blinded_message = BlindedMessage::new(1, keyset_id, b_.clone());
+
+            blank_outputs.push(blinded_message);
+
+            melting_secrets.push(MintSecret { secret, r });
+        }
+
+        Ok((blank_outputs, melting_secrets))
+    }
+
+    /// Processes quote response to receive LN fee return after melting
+    fn process_returned_change(
+        &mut self,
+        melt_quote: &MeltQuote,
+        melting_secrets: &[MintSecret],
+        active_keys: &BTreeMap<u64, String>,
+    ) -> Result<()> {
+        if let Some(promises) = &melt_quote.change {
             for (i, promise) in promises.iter().enumerate() {
                 let amount = &promise.amount;
                 let amount_key = active_keys
@@ -311,16 +342,9 @@ impl Wallet {
                     .context("construct proof")?;
                 self.proofs.push(proof);
             }
-            if !promises.is_empty() {
-                self.save()?; // save stored change
-            }
         }
 
-        if res_quote.state != QuoteState::Paid {
-            eprintln!("WARN: LN payment failed: {:?}", res_quote.state)
-        }
-
-        Ok(res_quote)
+        Ok(())
     }
 
     /// Used for melting.
@@ -442,10 +466,11 @@ impl Wallet {
             if !proofs_to_swap.is_empty() && !output_amounts.is_empty() {
                 // we need to do a swap to get a change
                 println!("--> Doing swap to get some change");
-                let (mut new_proofs, _fee) = self
+                let (mut new_proofs, swap_fee) = self
                     .swap_proofs(&proofs_to_swap, Some(&output_amounts))
                     .context("swap proofs")
                     .inspect_err(|_| self.proofs.append(&mut proofs_to_melt))?;
+                println!("--> Swap done (fee: {}), saving proofs...", swap_fee);
 
                 self.proofs.append(&mut new_proofs);
 
@@ -484,6 +509,8 @@ impl Wallet {
                 total_inputs_fee
             );
         }
+
+        println!("--> Melting fee: {}", total_inputs_fee);
 
         Ok(proofs_to_melt)
     }

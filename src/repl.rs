@@ -156,12 +156,13 @@ impl Repl {
 
                 writeln!(
                     std::io::stdout(),
-                    "  Melted: {} sats; LN invoice: {:?}; LN fee: {} quote ID: {}",
+                    "  Melted: {} sats; LN invoice: {:?}; LN fee: {}; quote ID: {}",
                     res.amount,
                     res.state,
                     res.fee_reserve - returned_change,
                     res.quote,
                 )?;
+                std::io::stdout().flush()?;
             }
             Command::Send { sats } => {
                 let (token, fee) = self.wallet.prepare_cashu_token(sats)?;

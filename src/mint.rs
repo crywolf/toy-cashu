@@ -246,7 +246,7 @@ impl Mint {
         let req = MeltRequest {
             quote: quote_id,
             inputs: proofs,
-            outputs: blank_outputs, // TODO https://github.com/cashubtc/nuts/blob/main/08.md
+            outputs: blank_outputs,
         };
 
         let r = self
