@@ -138,17 +138,15 @@ impl Wallet {
     }
 
     pub fn mint_tokens(&mut self, amount: u64) -> Result<Vec<u64>> {
-        let quote = self
-            .create_mint_quote(amount)
-            .context("create_mint_quote")?;
+        let (quote, secret_key) = self.create_mint_quote(amount)?;
 
         let quote_id = quote.quote.clone();
         let unit = quote.unit.clone();
 
-        // TODO store quote and request the mint later for its state
+        // TODO store quote and secret key and request the mint later for its state
         self.mint_quotes.push(quote);
 
-        // TODO loop
+        // TODO loop over stored quotes
         let quote = self.check_mint_quote(&quote_id)?;
         let invoice_state = quote.state;
 
@@ -186,7 +184,9 @@ impl Wallet {
                 minting_secrets.insert(amount, MintSecret { secret, r });
             }
 
-            let blind_signatures = self.mint.do_minting(&quote_id, &outputs)?;
+            let signature = quote.sign(&outputs, secret_key); // NUT-20: Signature on Mint Quote
+
+            let blind_signatures = self.mint.do_minting(&quote_id, &outputs, &signature)?;
 
             self.save()?; // save balance
 
@@ -227,9 +227,7 @@ impl Wallet {
         let available_amounts = self.proofs().map(|p| p.amount).collect::<Vec<_>>();
         let have_total = available_amounts.iter().sum::<u64>();
 
-        let quote = self
-            .create_melt_quote(invoice)
-            .context("create_melt_quote")?;
+        let quote = self.create_melt_quote(invoice)?;
 
         let quote_id = quote.quote.clone();
         let fee_reserve = quote.fee_reserve;
@@ -818,12 +816,16 @@ impl Wallet {
         1.max((fee_reserve).ilog2() + 1)
     }
 
-    fn create_mint_quote(&self, amount: u64) -> Result<MintQuote> {
+    fn create_mint_quote(&self, amount: u64) -> Result<(MintQuote, SecretKey)> {
+        let secret_key = SecretKey::generate(); // NUT-20: Signature on Mint Quote
+        let pubkey = secret_key.public_key();
+
         let quote = self
             .mint
-            .create_mint_quote(amount)
+            .create_mint_quote(amount, pubkey)
             .context("create_mint_quote")?;
-        Ok(quote)
+
+        Ok((quote, secret_key))
     }
 
     fn check_mint_quote(&self, quote_id: &str) -> Result<MintQuote> {

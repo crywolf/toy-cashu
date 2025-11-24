@@ -150,6 +150,17 @@ impl SecretKey {
         let secp = secp256k1::Secp256k1::new();
         self.inner.public_key(&secp).into()
     }
+
+    /// Returns Schnorr signature of the `msg` according to NUT-20
+    pub fn sign_mint_quote(&self, msg: &str) -> [u8; 64] {
+        let msg_hash = Sha256Hash::hash(msg.as_bytes());
+
+        let secp = Secp256k1::new();
+        let keypair = self.inner.keypair(&secp);
+
+        let signature = secp.sign_schnorr_no_aux_rand(msg_hash.as_byte_array(), &keypair);
+        signature.to_byte_array()
+    }
 }
 
 impl Drop for SecretKey {

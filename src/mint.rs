@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cashu::{
     BlindSignatures, BlindedMessage, Proof,
+    crypto::PublicKey,
     types::{Keys, Keysets, MeltQuote, MintQuote},
 };
 
@@ -100,20 +101,20 @@ impl Mint {
     }
 
     /// NUT-23: BOLT11
-    pub fn create_mint_quote(&self, amount: u64) -> Result<MintQuote> {
+    pub fn create_mint_quote(&self, amount: u64, pubkey: PublicKey) -> Result<MintQuote> {
         #[derive(Serialize)]
         struct QuoteRequest {
             amount: u64,
             unit: String,
             #[serde(skip_serializing_if = "Option::is_none")]
-            pubkey: Option<String>,
+            pubkey: Option<String>, // NUT-20: Signature on Mint Quote
         }
 
         let payment_method = "bolt11";
         let req = QuoteRequest {
             amount,
             unit: "sat".to_owned(),
-            pubkey: None,
+            pubkey: Some(pubkey.to_hex()),
         };
 
         let r = self
@@ -152,17 +153,20 @@ impl Mint {
         &self,
         quote_id: &str,
         outputs: &[BlindedMessage],
+        signature: &str,
     ) -> Result<BlindSignatures> {
         #[derive(Serialize)]
         struct MintRequest<'a> {
             quote: &'a str,
             outputs: &'a [BlindedMessage],
+            signature: String, // NUT-20: Signature on Mint Quote
         }
 
         let payment_method = "bolt11";
         let req = MintRequest {
             quote: quote_id,
             outputs,
+            signature: signature.to_owned(),
         };
 
         let r = self

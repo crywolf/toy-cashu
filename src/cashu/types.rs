@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::cashu::BlindSignature;
+use crate::cashu::{BlindSignature, BlindedMessage, crypto::SecretKey};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MintQuote {
@@ -12,6 +12,20 @@ pub struct MintQuote {
     pub unit: String,
     pub state: QuoteState,
     pub pubkey: Option<String>,
+}
+
+impl MintQuote {
+    /// Returns Schnorr signature according to NUT-20 using `secret_key`
+    pub fn sign(&self, outputs: &[BlindedMessage], secret_key: SecretKey) -> String {
+        let mut msg = String::from(&self.quote);
+
+        let bs: Vec<String> = outputs.iter().map(|m| m.b_.0.clone()).collect();
+
+        msg.push_str(&bs.join(""));
+
+        let signature = secret_key.sign_mint_quote(&msg);
+        hex::encode(signature)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
