@@ -184,13 +184,24 @@ impl Mint {
 
     // NUT-03: Swap tokens
     pub fn do_swap(&self, inputs: &[Proof], outputs: &[BlindedMessage]) -> Result<BlindSignatures> {
+        // Privacy: The blinding factor r should not be shared with the mint or otherwise,
+        // the mint will be able to associate the BlindSignature with the Proof
+        let mut sanitized_proofs = vec![];
+        for mut proof in inputs.iter().cloned() {
+            proof.remove_dleq();
+            sanitized_proofs.push(proof);
+        }
+
         #[derive(Serialize)]
         struct SwapRequest<'a> {
             inputs: &'a [Proof],
             outputs: &'a [BlindedMessage],
         }
 
-        let req = SwapRequest { inputs, outputs };
+        let req = SwapRequest {
+            inputs: &sanitized_proofs,
+            outputs,
+        };
 
         let r = self
             .http
@@ -239,6 +250,14 @@ impl Mint {
         proofs: &[Proof],
         blank_outputs: &[BlindedMessage],
     ) -> Result<MeltQuote> {
+        // Privacy: The blinding factor r should not be shared with the mint or otherwise,
+        // the mint will be able to associate the BlindSignature with the Proof
+        let mut sanitized_proofs = vec![];
+        for mut proof in proofs.iter().cloned() {
+            proof.remove_dleq();
+            sanitized_proofs.push(proof);
+        }
+
         #[derive(Serialize)]
         struct MeltRequest<'a> {
             quote: &'a str,
@@ -249,7 +268,7 @@ impl Mint {
         let payment_method = "bolt11";
         let req = MeltRequest {
             quote: quote_id,
-            inputs: proofs,
+            inputs: &sanitized_proofs,
             outputs: blank_outputs,
         };
 

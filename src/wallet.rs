@@ -187,6 +187,9 @@ impl Wallet {
             let signature = quote.sign(&outputs, secret_key); // NUT-20: Signature on Mint Quote
 
             let blind_signatures = self.mint.do_minting(&quote_id, &outputs, &signature)?;
+            blind_signatures
+                .validate_dleq(&outputs, &active_keys)
+                .context("validate DLEQ proofs on blind signatures returned by mint")?;
 
             self.save()?; // save balance
 
@@ -624,6 +627,9 @@ impl Wallet {
         }
 
         let blind_signatures = self.mint.do_swap(old_proofs, &outputs)?;
+        blind_signatures
+            .validate_dleq(&outputs, &active_keys)
+            .context("validate DLEQ proofs on blind signatures returned by mint")?;
 
         let promises = blind_signatures.signatures;
 

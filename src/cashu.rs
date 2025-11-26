@@ -1,6 +1,6 @@
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::{
     Engine as _, alphabet,
     engine::{
@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 
 use crypto::{PublicKey, Secret, SecretKey, hash_to_curve};
+
+use crate::cashu::crypto::hash_e;
 
 pub mod crypto;
 pub mod types;
@@ -37,6 +39,12 @@ impl BlindedSecret {
     }
 }
 
+impl std::fmt::Display for BlindedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// C_ blind signature (on B_)
 #[derive(Debug, Clone, Deserialize)]
 pub struct BlindedKey(String);
@@ -52,6 +60,12 @@ impl BlindedKey {
         let c = c_.combine(&rk.negate())?;
 
         Ok(c)
+    }
+}
+
+impl std::fmt::Display for BlindedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -78,7 +92,7 @@ impl BlindedMessage {
     }
 }
 
-/// A BlindSignature is sent from Bob to Alice after minting tokens or after swapping tokens.
+/// A BlindSignature is sent from Mint to Alice after minting tokens or after swapping tokens.
 /// A BlindSignature is also called a _promise_.
 #[derive(Debug, Deserialize)]
 pub struct BlindSignature {
@@ -89,6 +103,8 @@ pub struct BlindSignature {
     /// blinded signature on the secret message B_ sent in the previous step
     #[serde(rename = "C_")]
     c_: BlindedKey,
+    /// Discrete Log Equality (DLEQ) proof (NUT-12). Mint returns the DLEQ proof for a mint or swap operation.
+    dleq: Option<Dleq>,
 }
 
 impl BlindSignature {
@@ -100,6 +116,16 @@ impl BlindSignature {
     ) -> Result<Proof> {
         let c_ = self.c_.clone();
 
+        let proof_dleq = if let Some(promise_dleq) = self.dleq.clone() {
+            Some(DleqProof {
+                e: promise_dleq.e,
+                s: promise_dleq.s,
+                r: r.to_string(),
+            })
+        } else {
+            None
+        };
+
         Ok(Proof {
             amount: self.amount,
             keyset_id: self.keyset_id.clone(),
@@ -108,13 +134,78 @@ impl BlindSignature {
                 .unblind(r, amount_pubkey)
                 .context("unblind signature")?
                 .to_string(),
+            dleq: proof_dleq,
         })
     }
+}
+
+/// Discrete Log Equality (DLEQ) proof (NUT-12). Mint returns the DLEQ proof for a mint or swap operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Dleq {
+    e: String,
+    s: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct BlindSignatures {
     pub signatures: Vec<BlindSignature>,
+}
+
+impl BlindSignatures {
+    pub fn validate_dleq(
+        &self,
+        outputs: &[BlindedMessage],
+        active_keys: &BTreeMap<u64, String>,
+    ) -> Result<bool> {
+        // R1 = s*G - e*K
+        // R2 = s*B' - e*C'
+        // e == hash(R1,R2,A,C') # must be True
+
+        if self.signatures.len() != outputs.len() {
+            bail!("Returned signatures count does not match sent blinded messages count");
+        }
+
+        for (i, signature) in self.signatures.iter().enumerate() {
+            if let Some(dleq) = &signature.dleq {
+                let amount = signature.amount;
+                let amount_key = active_keys
+                    .get(&amount)
+                    .ok_or_else(|| anyhow!("Mint error: key for amount does not exist"))?;
+
+                let k = PublicKey::from_hex(amount_key).context("'K' pubkey")?;
+
+                let bm = &outputs[i];
+                let b = PublicKey::from_hex(bm.b_.to_string()).context("'B' pubkey")?;
+
+                let c_ = signature.c_.to_string();
+                let c = PublicKey::from_hex(&c_).context("'B' pubkey")?;
+
+                let e = SecretKey::from_hex(&dleq.e).context("'e' secret key")?;
+                let s = SecretKey::from_hex(&dleq.s).context("'s' secret key")?;
+
+                // R1 = s*G - e*K = S - e*K
+                let r1 = &s.public_key().combine(&k.mul_tweak(&e)?.negate())?.to_hex();
+
+                // R2 = s*B' - e*C'
+                let r2 = &b
+                    .mul_tweak(&s)?
+                    .combine(&c.mul_tweak(&e)?.negate())?
+                    .to_hex();
+
+                let computed_e = hash_e(r1, r2, &k.to_hex(), &c_).context("hash_e")?;
+
+                if dleq.e != computed_e {
+                    bail!(
+                        "DLEQ validation mismatch! Expected {}; got {}",
+                        computed_e,
+                        dleq.e
+                    )
+                }
+            }
+        }
+
+        Ok(true)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +219,23 @@ pub struct Proof {
     /// unblinded signature on secret
     #[serde(rename = "C")]
     c: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dleq: Option<DleqProof>,
+}
+
+impl Proof {
+    pub fn remove_dleq(&mut self) {
+        self.dleq = None
+    }
+}
+
+/// Discrete Log Equality (DLEQ) proof (NUT-12). Mint returns the DLEQ proof for a mint or swap operation.
+/// If we want to send the proof to another user we also need to include the blinding factor r for the proof to be convincing to another user.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DleqProof {
+    e: String,
+    s: String,
+    r: String, // We also need to include the blinding factor r for the proof to be convincing to another user
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -232,6 +340,7 @@ impl TokenV4 {
                     keyset_id: keyset_id.clone(),
                     secret: token_proof.secret.clone(),
                     c: hex::encode(token_proof.c.clone()),
+                    dleq: None,
                 };
                 proofs.push(proof);
             }
@@ -302,6 +411,7 @@ mod tests {
             keyset_id: "00ffd48b8f5ecf80".to_string(),
             secret: "acc12435e7b8484c3cf1850149218af90f716a52bf4a5ed347e48ecc13f77388".to_string(),
             c: "0244538319de485d55bed3b29a642bee5879375ab9e7a620e11e48ba482421f3cf".to_string(),
+            dleq: None,
         };
 
         let proof2 = Proof {
@@ -309,6 +419,7 @@ mod tests {
             keyset_id: "00ad268c4d1f5826".to_string(),
             secret: "1323d3d4707a58ad2e23ada4e9f1f49f5a5b4ac7b708eb0d61f738f48307e8ee".to_string(),
             c: "023456aa110d84b4ac747aebd82c3b005aca50bf457ebd5737a4414fac3ae7d94d".to_string(),
+            dleq: None,
         };
 
         let proof3 = Proof {
@@ -316,6 +427,7 @@ mod tests {
             keyset_id: "00ad268c4d1f5826".to_string(),
             secret: "56bcbcbb7cc6406b3fa5d57d2174f4eff8b4402b176926d3a57d3c3dcbb59d57".to_string(),
             c: "0273129c5719e599379a974a626363c333c56cafc0e6d01abe46d5808280789c63".to_string(),
+            dleq: None,
         };
 
         let mint_url = "http://localhost:3338";
@@ -351,5 +463,54 @@ mod tests {
 
         let deserialized_token = TokenV4::from_str(token_with_padding).unwrap();
         assert_eq!(deserialized_token, expected);
+    }
+
+    #[test]
+    fn test_validate_dleq() {
+        // https://github.com/cashubtc/nuts/blob/main/tests/12-tests.md#dleq-verification-on-blindsignature
+        /*
+          A: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+          B_: "02a9acc1e48c25eeeb9289b5031cc57da9fe72f3fe2861d264bdc074209b107ba2"
+
+        {
+          "amount": 8,
+          "id": "00882760bfa2eb41",
+          "C_": "02a9acc1e48c25eeeb9289b5031cc57da9fe72f3fe2861d264bdc074209b107ba2",
+          "dleq": {
+            "e": "9818e061ee51d5c8edc3342369a554998ff7b4381c8652d724cdf46429be73d9",
+            "s": "9818e061ee51d5c8edc3342369a554998ff7b4381c8652d724cdf46429be73da"
+          }
+        }
+        */
+
+        let k = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".to_string();
+        let b_ = "02a9acc1e48c25eeeb9289b5031cc57da9fe72f3fe2861d264bdc074209b107ba2".to_string();
+
+        let id = "00882760bfa2eb41".to_string();
+
+        let signature = BlindSignature {
+            amount: 8,
+            keyset_id: id.clone(),
+            c_: BlindedKey(
+                "02a9acc1e48c25eeeb9289b5031cc57da9fe72f3fe2861d264bdc074209b107ba2".to_string(),
+            ),
+            dleq: Some(Dleq {
+                e: "9818e061ee51d5c8edc3342369a554998ff7b4381c8652d724cdf46429be73d9".to_string(),
+                s: "9818e061ee51d5c8edc3342369a554998ff7b4381c8652d724cdf46429be73da".to_string(),
+            }),
+        };
+
+        let active_keys: BTreeMap<u64, String> = BTreeMap::from([(8, k)]);
+        let outputs = vec![BlindedMessage {
+            amount: 8,
+            keyset_id: id,
+            b_: BlindedSecret(b_),
+        }];
+
+        let signatures = BlindSignatures {
+            signatures: vec![signature],
+        };
+
+        assert!(signatures.validate_dleq(&outputs, &active_keys).unwrap());
     }
 }

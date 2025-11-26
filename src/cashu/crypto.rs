@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use secp256k1::Secp256k1;
 use secp256k1::hashes::Hash;
 use secp256k1::hashes::sha256::Hash as Sha256Hash;
@@ -145,6 +145,16 @@ impl SecretKey {
         }
     }
 
+    /// Parse from `hex` string
+    pub fn from_hex<S>(hex: S) -> Result<Self>
+    where
+        S: AsRef<str>,
+    {
+        Ok(Self {
+            inner: secp256k1::SecretKey::from_str(hex.as_ref())?,
+        })
+    }
+
     /// Returns the PublicKey for this SecretKey.
     pub fn public_key(&self) -> PublicKey {
         let secp = secp256k1::Secp256k1::new();
@@ -203,6 +213,45 @@ pub fn hash_to_curve(message: &[u8]) -> Result<PublicKey> {
     bail!("No valid point");
 }
 
+/// Generates deterministic SHA256 hash for a given input list of public keys for DLEQ proof validation.
+///
+/// For definition in NUT see [NUT-12](https://github.com/cashubtc/nuts/blob/main/12.md)
+pub fn hash_e(r1: &str, r2: &str, k: &str, c_: &str) -> Result<String> {
+    let r1 = hex::encode(
+        PublicKey::from_hex(r1)
+            .context("pubkey from 'r1'")?
+            .inner
+            .serialize_uncompressed(),
+    );
+
+    let r2 = hex::encode(
+        PublicKey::from_hex(r2)
+            .context("pubkey from 'r2'")?
+            .inner
+            .serialize_uncompressed(),
+    );
+
+    let k = hex::encode(
+        PublicKey::from_hex(k)
+            .context("pubkey from 'k'")?
+            .inner
+            .serialize_uncompressed(),
+    );
+
+    let c_ = hex::encode(
+        PublicKey::from_hex(c_)
+            .context("pubkey from 'c_'")?
+            .inner
+            .serialize_uncompressed(),
+    );
+
+    let data = [r1, r2, k, c_].concat();
+
+    let hash = Sha256Hash::hash(data.as_bytes());
+
+    Ok(hash.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +286,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(y, expected_y);
+    }
+
+    #[test]
+    fn test_hash_e() {
+        let r1 = "020000000000000000000000000000000000000000000000000000000000000001";
+        let r2 = "020000000000000000000000000000000000000000000000000000000000000001";
+        let k = "020000000000000000000000000000000000000000000000000000000000000001";
+        let c_ = "02a9acc1e48c25eeeb9289b5031cc57da9fe72f3fe2861d264bdc074209b107ba2";
+
+        let expected_e = "a4dc034b74338c28c6bc3ea49731f2a24440fc7c4affc08b31a93fc9fbe6401e";
+
+        let e = hash_e(r1, r2, k, c_).unwrap();
+
+        assert_eq!(expected_e, e);
     }
 }
