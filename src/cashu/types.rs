@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::cashu::{BlindSignature, BlindedMessage, crypto::SecretKey};
 
+/// Public keys for a set of amounts
+pub type AmountKeys = BTreeMap<u64, String>;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MintQuote {
     pub quote: String,
@@ -65,7 +68,7 @@ impl Keys {
 pub struct Keyset {
     pub id: String,
     pub unit: String,
-    pub keys: BTreeMap<u64, String>,
+    pub keys: AmountKeys,
 }
 
 #[derive(Debug, Clone, Deserialize)]

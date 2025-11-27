@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, str::FromStr};
+use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{
@@ -13,10 +13,36 @@ use serde_bytes::ByteBuf;
 
 use crypto::{PublicKey, Secret, SecretKey, hash_to_curve};
 
-use crate::cashu::crypto::hash_e;
+use crate::cashu::{
+    crypto::hash_e,
+    types::{AmountKeys, Keys},
+};
 
 pub mod crypto;
 pub mod types;
+
+pub type Proofs = Vec<Proof>;
+
+pub trait ProofsMethods {
+    fn validate_dleq(&self, all_keys: &Keys) -> Result<bool>;
+}
+
+impl ProofsMethods for Proofs {
+    fn validate_dleq(&self, all_keys: &Keys) -> Result<bool> {
+        for proof in self {
+            let proof_keyset_id = &proof.keyset_id;
+
+            let keys = all_keys
+                .clone()
+                .by_id(proof_keyset_id)
+                .ok_or_else(|| anyhow!("Mint error: keyset {} does not exist", proof_keyset_id))?
+                .keys;
+
+            proof.validate_dleq(&keys)?;
+        }
+        Ok(true)
+    }
+}
 
 /// Blinded secret message B_
 #[derive(Debug, Clone, Serialize)]
@@ -155,7 +181,7 @@ impl BlindSignatures {
     pub fn validate_dleq(
         &self,
         outputs: &[BlindedMessage],
-        active_keys: &BTreeMap<u64, String>,
+        active_keys: &AmountKeys,
     ) -> Result<bool> {
         // R1 = s*G - e*K
         // R2 = s*B' - e*C'
@@ -226,7 +252,7 @@ impl Proof {
         self.dleq = None
     }
 
-    pub fn validate_dleq(&self, keys: &BTreeMap<u64, String>) -> Result<bool> {
+    pub fn validate_dleq(&self, keys: &AmountKeys) -> Result<bool> {
         if let Some(dleq) = &self.dleq {
             // Y = hash_to_curve(x)
             // C' = C + r*K
@@ -379,7 +405,7 @@ impl TokenV4 {
         &self.mint_url
     }
 
-    pub fn proofs(&self) -> Vec<Proof> {
+    pub fn proofs(&self) -> Proofs {
         let mut proofs = vec![];
 
         for inner_token in self.tokens.iter() {
@@ -403,6 +429,10 @@ impl TokenV4 {
         }
 
         proofs
+    }
+
+    pub fn validate_dleq_proofs(&self, keys: &Keys) -> Result<bool> {
+        self.proofs().validate_dleq(keys)
     }
 }
 
@@ -620,7 +650,7 @@ mod tests {
             }),
         };
 
-        let active_keys: BTreeMap<u64, String> = BTreeMap::from([(8, k)]);
+        let active_keys = AmountKeys::from([(8, k)]);
         let outputs = vec![BlindedMessage {
             amount: 8,
             keyset_id: id,
@@ -671,7 +701,7 @@ mod tests {
             }),
         };
 
-        let keys: BTreeMap<u64, String> = BTreeMap::from([(1, k)]);
+        let keys = AmountKeys::from([(1, k)]);
 
         assert!(proof.validate_dleq(&keys).unwrap());
 

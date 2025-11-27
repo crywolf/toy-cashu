@@ -8,10 +8,13 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::mint::{Mint, MintInfo};
+use crate::{
+    cashu::types::AmountKeys,
+    mint::{Mint, MintInfo},
+};
 use crate::{
     cashu::{
-        BlindedMessage, BlindedSecret, Proof, TokenV4,
+        BlindedMessage, BlindedSecret, Proof, Proofs, TokenV4,
         crypto::{PublicKey, Secret, SecretKey},
         types::{Keys, Keysets, MeltQuote, MintQuote, QuoteState},
     },
@@ -26,7 +29,7 @@ pub struct Wallet {
     pub name: String,
     #[serde(flatten)]
     mint: Mint,
-    proofs: Vec<Proof>,
+    proofs: Proofs,
     #[serde(skip)]
     mint_quotes: Vec<MintQuote>,
     #[serde(skip)]
@@ -321,7 +324,7 @@ impl Wallet {
         &mut self,
         melt_quote: &MeltQuote,
         melting_secrets: &[MintSecret],
-        active_keys: &BTreeMap<u64, String>,
+        active_keys: &AmountKeys,
     ) -> Result<()> {
         if let Some(promises) = &melt_quote.change {
             for (i, promise) in promises.iter().enumerate() {
@@ -349,7 +352,7 @@ impl Wallet {
     }
 
     /// Used for melting.
-    fn extract_proofs_for_melting(&mut self, amount_to_melt: u64) -> Result<Vec<Proof>> {
+    fn extract_proofs_for_melting(&mut self, amount_to_melt: u64) -> Result<Proofs> {
         let mut available_amounts = self.proofs.iter().map(|p| p.amount).collect::<Vec<_>>();
         available_amounts.sort();
 
@@ -544,23 +547,12 @@ impl Wallet {
             );
         }
 
+        // validate DLEQ in proofs
+        let all_keys = &self.mint_keys()?;
+        token.validate_dleq_proofs(all_keys)?;
+
         // get proofs from token and swap them for new
         let proofs = token.proofs();
-
-        let all_keys = &self.mint_keys()?;
-
-        // validate DLEQ in proofs
-        for proof in proofs.iter() {
-            let proof_keyset_id = &proof.keyset_id;
-
-            let keys = all_keys
-                .clone()
-                .by_id(proof_keyset_id)
-                .ok_or_else(|| anyhow!("Mint error: keyset {} does not exist", proof_keyset_id))?
-                .keys;
-
-            proof.validate_dleq(&keys)?;
-        }
 
         let (mut new_proofs, fee) = self.swap_proofs(&proofs, None).context("swap proofs")?;
 
@@ -575,7 +567,7 @@ impl Wallet {
         &mut self,
         old_proofs: &[Proof],
         output_amounts: Option<&[u64]>,
-    ) -> Result<(Vec<Proof>, u64)> {
+    ) -> Result<(Proofs, u64)> {
         let mut proof_unit = String::new();
 
         // calculate fee
@@ -675,7 +667,7 @@ impl Wallet {
     }
 
     /// Get proofs with specified amounts and remove them from the wallet
-    fn extract_proofs_with_amounts(&mut self, amounts: &[u64]) -> Result<Vec<Proof>> {
+    fn extract_proofs_with_amounts(&mut self, amounts: &[u64]) -> Result<Proofs> {
         let mut extracted_proofs = Vec::new();
         let mut amounts = amounts.to_vec();
         let amounts_len = amounts.len();
@@ -717,7 +709,7 @@ impl Wallet {
     fn prepare_amounts_for_swap_before_spend(
         &mut self,
         total_amount_to_spend: u64,
-    ) -> Result<(Vec<Proof>, Vec<u64>, Vec<u64>)> {
+    ) -> Result<(Proofs, Vec<u64>, Vec<u64>)> {
         let mut available_amounts = self.proofs.iter().map(|p| p.amount).collect::<Vec<_>>();
 
         available_amounts.sort();
@@ -805,7 +797,7 @@ impl Wallet {
     }
 
     /// Extracts and returns proofs to be spend and potential swap fee. Used for Cashu token creation.
-    fn prepare_inputs_for_spend(&mut self, amount: u64) -> Result<(Vec<Proof>, u64)> {
+    fn prepare_inputs_for_spend(&mut self, amount: u64) -> Result<(Proofs, u64)> {
         let (input_proofs, output_amounts, amounts_to_spend) =
             self.prepare_amounts_for_swap_before_spend(amount)?;
 
