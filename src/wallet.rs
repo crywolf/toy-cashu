@@ -526,10 +526,10 @@ impl Wallet {
 
         let (proofs_to_spend, fee) = self.prepare_inputs_for_spend(amount)?;
 
-        self.save()?;
-
         let token =
             TokenV4::new(&self.mint.url(), "sat", &proofs_to_spend).context("create V4 token")?;
+
+        self.save()?;
 
         Ok((token, fee))
     }
@@ -546,6 +546,21 @@ impl Wallet {
 
         // get proofs from token and swap them for new
         let proofs = token.proofs();
+
+        let all_keys = &self.mint_keys()?;
+
+        // validate DLEQ in proofs
+        for proof in proofs.iter() {
+            let proof_keyset_id = &proof.keyset_id;
+
+            let keys = all_keys
+                .clone()
+                .by_id(proof_keyset_id)
+                .ok_or_else(|| anyhow!("Mint error: keyset {} does not exist", proof_keyset_id))?
+                .keys;
+
+            proof.validate_dleq(&keys)?;
+        }
 
         let (mut new_proofs, fee) = self.swap_proofs(&proofs, None).context("swap proofs")?;
 

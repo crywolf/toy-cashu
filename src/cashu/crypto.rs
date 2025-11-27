@@ -119,12 +119,6 @@ pub struct SecretKey {
     inner: secp256k1::SecretKey,
 }
 
-impl std::fmt::Display for SecretKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Secret key")
-    }
-}
-
 impl std::fmt::Debug for SecretKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "SecretKey(XXXX)")
@@ -170,6 +164,11 @@ impl SecretKey {
 
         let signature = secp.sign_schnorr_no_aux_rand(msg_hash.as_byte_array(), &keypair);
         signature.to_byte_array()
+    }
+
+    /// Displays the secret key as a hexadecimal string. This method should be used with extreme caution.
+    pub fn display_secret(&self) -> String {
+        self.inner.display_secret().to_string()
     }
 }
 
