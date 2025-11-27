@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::cashu::{
     BlindSignatures, BlindedMessage, Proof,
     crypto::PublicKey,
-    types::{Keys, Keysets, MeltQuote, MintQuote},
+    types::{AllKeysetInfos, AllKeysets, MeltQuote, MintQuote},
 };
 
 /// Mint object represents remote mint. Used by [`super::Wallet`] to communicate with mint server specified by its `url`.
@@ -18,9 +18,9 @@ pub struct Mint {
     #[serde(skip)]
     info: Option<MintInfo>,
     #[serde(skip)]
-    keys: Option<Keys>,
+    all_keysets: Option<AllKeysets>,
     #[serde(skip)]
-    keysets: Option<Keysets>,
+    all_keyset_infos: Option<AllKeysetInfos>,
     #[serde(skip, default = "reqwest::blocking::Client::new")]
     http: reqwest::blocking::Client,
 }
@@ -58,8 +58,8 @@ impl Mint {
         Ok(Self {
             url,
             info: None,
-            keys: None,
-            keysets: None,
+            all_keysets: None,
+            all_keyset_infos: None,
             http: c,
         })
     }
@@ -80,24 +80,27 @@ impl Mint {
     }
 
     /// NUT-01: Mint public key exchange
-    pub fn get_keys(&mut self) -> Result<&Keys> {
-        if self.keys.is_none() {
+    pub fn get_keys(&mut self) -> Result<&AllKeysets> {
+        if self.all_keysets.is_none() {
             let r = self.http.get(self.url.join("/v1/keys")?).send()?;
-            let keys: Keys = r.json()?;
-            self.keys = Some(keys);
+            let keys: AllKeysets = r.json()?;
+            self.all_keysets = Some(keys);
         }
 
-        Ok(self.keys.as_ref().expect("keys were downloaded"))
+        Ok(self.all_keysets.as_ref().expect("keys were downloaded"))
     }
 
     /// NUT-02: Keysets and fees
-    pub fn get_keysets(&mut self) -> Result<&Keysets> {
-        if self.keysets.is_none() {
+    pub fn get_keysets(&mut self) -> Result<&AllKeysetInfos> {
+        if self.all_keyset_infos.is_none() {
             let r = self.http.get(self.url.join("/v1/keysets")?).send()?;
-            let keysets: Keysets = r.json()?;
-            self.keysets = Some(keysets);
+            let keysets: AllKeysetInfos = r.json()?;
+            self.all_keyset_infos = Some(keysets);
         }
-        Ok(self.keysets.as_ref().expect("keysets were downloaded"))
+        Ok(self
+            .all_keyset_infos
+            .as_ref()
+            .expect("keysets were downloaded"))
     }
 
     /// NUT-23: BOLT11

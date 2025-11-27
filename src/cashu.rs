@@ -15,7 +15,7 @@ use crypto::{PublicKey, Secret, SecretKey, hash_to_curve};
 
 use crate::cashu::{
     crypto::hash_e,
-    types::{AmountKeys, Keys},
+    types::{AllKeysets, AmountKeys},
 };
 
 pub mod crypto;
@@ -24,15 +24,15 @@ pub mod types;
 pub type Proofs = Vec<Proof>;
 
 pub trait ProofsMethods {
-    fn validate_dleq(&self, all_keys: &Keys) -> Result<bool>;
+    fn validate_dleq(&self, all_keysets: &AllKeysets) -> Result<bool>;
 }
 
 impl ProofsMethods for Proofs {
-    fn validate_dleq(&self, all_keys: &Keys) -> Result<bool> {
+    fn validate_dleq(&self, all_keysets: &AllKeysets) -> Result<bool> {
         for proof in self {
             let proof_keyset_id = &proof.keyset_id;
 
-            let keys = all_keys
+            let keys = all_keysets
                 .clone()
                 .by_id(proof_keyset_id)
                 .ok_or_else(|| anyhow!("Mint error: keyset {} does not exist", proof_keyset_id))?
@@ -431,8 +431,8 @@ impl TokenV4 {
         proofs
     }
 
-    pub fn validate_dleq_proofs(&self, keys: &Keys) -> Result<bool> {
-        self.proofs().validate_dleq(keys)
+    pub fn validate_dleq_proofs(&self, all_keysets: &AllKeysets) -> Result<bool> {
+        self.proofs().validate_dleq(all_keysets)
     }
 }
 

@@ -53,11 +53,11 @@ pub enum QuoteState {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct Keys {
+pub struct AllKeysets {
     keysets: Vec<Keyset>,
 }
 
-impl Keys {
+impl AllKeysets {
     pub fn by_id(self, id: &str) -> Option<Keyset> {
         self.keysets.into_iter().find(|ks| ks.id == id)
     }
@@ -72,11 +72,11 @@ pub struct Keyset {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct Keysets {
+pub struct AllKeysetInfos {
     pub keysets: Vec<KeysetInfo>,
 }
 
-impl Keysets {
+impl AllKeysetInfos {
     pub fn for_unit(self, unit: &str) -> Option<KeysetInfo> {
         self.keysets.into_iter().find(|s| s.unit == unit)
     }

@@ -16,7 +16,7 @@ use crate::{
     cashu::{
         BlindedMessage, BlindedSecret, Proof, Proofs, TokenV4,
         crypto::{PublicKey, Secret, SecretKey},
-        types::{Keys, Keysets, MeltQuote, MintQuote, QuoteState},
+        types::{AllKeysetInfos, AllKeysets, MeltQuote, MintQuote, QuoteState},
     },
     file, helpers,
 };
@@ -115,11 +115,11 @@ impl Wallet {
         Ok(info)
     }
 
-    pub fn mint_keys(&mut self) -> Result<Keys> {
+    pub fn mint_keys(&mut self) -> Result<AllKeysets> {
         self.mint.get_keys().cloned()
     }
 
-    pub fn mint_keysets(&mut self, only_active: bool) -> Result<Keysets> {
+    pub fn mint_keysets(&mut self, only_active: bool) -> Result<AllKeysetInfos> {
         let mut ks = self.mint.get_keysets().cloned().context("get_keysets")?;
         if only_active {
             let ks_vec = ks
@@ -392,12 +392,12 @@ impl Wallet {
         for proof in proofs_to_melt.iter() {
             let proof_keyset_id = &proof.keyset_id;
 
-            let proof_keyset = self
+            let proof_keyset_info = self
                 .mint_keysets(false)?
                 .by_id(proof_keyset_id)
                 .ok_or(anyhow!("Missing keyset {}", proof_keyset_id))?;
 
-            sum_fee_ppk += proof_keyset.input_fee_ppk;
+            sum_fee_ppk += proof_keyset_info.input_fee_ppk;
 
             let index = available_amounts
                 .iter()
@@ -490,12 +490,12 @@ impl Wallet {
         for proof in additional_proofs_to_melt.iter() {
             let proof_keyset_id = &proof.keyset_id;
 
-            let proof_keyset = self
+            let proof_keyset_info = self
                 .mint_keysets(false)?
                 .by_id(proof_keyset_id)
                 .ok_or(anyhow!("Missing keyset {}", proof_keyset_id))?;
 
-            sum_fee_ppk += proof_keyset.input_fee_ppk;
+            sum_fee_ppk += proof_keyset_info.input_fee_ppk;
         }
 
         proofs_to_melt.append(&mut additional_proofs_to_melt);
@@ -548,8 +548,8 @@ impl Wallet {
         }
 
         // validate DLEQ in proofs
-        let all_keys = &self.mint_keys()?;
-        token.validate_dleq_proofs(all_keys)?;
+        let all_keysets = &self.mint_keys()?;
+        token.validate_dleq_proofs(all_keysets)?;
 
         // get proofs from token and swap them for new
         let proofs = token.proofs();
@@ -575,16 +575,16 @@ impl Wallet {
         for proof in old_proofs.iter() {
             let proof_keyset_id = &proof.keyset_id;
 
-            let proof_keyset = self
+            let proof_keyset_info = self
                 .mint_keysets(false)?
                 .by_id(proof_keyset_id)
                 .ok_or_else(|| anyhow!("Missing keyset {}", proof_keyset_id))?;
 
             if proof_unit.is_empty() {
-                proof_unit = proof_keyset.unit.clone();
+                proof_unit = proof_keyset_info.unit.clone();
             }
 
-            sum_fee_ppk += proof_keyset.input_fee_ppk;
+            sum_fee_ppk += proof_keyset_info.input_fee_ppk;
         }
 
         let fee = sum_fee_ppk.div_ceil(1000);
